@@ -30,5 +30,5 @@
 #error "no config"
 #endif
 
-/* NFSMW: components of the cutscene WMV3 decoder. */
-#include "config_nfsmw_wmv3.h"
+/* COD2: components of the cutscene WMV3 decoder. */
+#include "config_cod2_wmv3.h"

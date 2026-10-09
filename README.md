@@ -1,283 +1,149 @@
 <div align=center>
 
-<img src="extras/banner.png" alt="Need for Speed: Most Wanted" width="60%">
+# Call of Duty 2 — Nintendo Switch port
 
 </div>
-<h1 align=center>Need for Speed: Most Wanted — Nintendo Switch port</h1>
 
-A native Nintendo Switch port of the Xbox 360 version of **Need for Speed: Most Wanted** (2005).
+A work-in-progress native Nintendo Switch port of the Xbox 360 version of **Call of Duty 2** (2005), built by static
+recompilation with [ReXGlue](https://github.com/rexglue/rexglue-sdk).
 
-It's not an emulator. The PowerPC code of the game's `default.xex` is statically recompiled to C++ with
-[ReXGlue](https://github.com/rexglue/rexglue-sdk) and compiled for the Switch and the game is drawn by a native
-Vulkan renderer running on NVK (Mesa). It targets **30 FPS at the console's stock clocks** with no overclock.
+> [!IMPORTANT]
+> **Nothing has been recompiled for Call of Duty 2 yet.** This repository is a hard fork of
+> [nfsmw-nx](https://github.com/StevensND/nfsmw-nx) at commit `4e3ffc24fe80285189f2cea601606c529d5f1b97`, with the
+> identifiers and file names renamed from `nfsmw` to `cod2`. The reusable machinery (the Switch layer in `sdk/`, the
+> Mesa patch, the shader tooling, the build scripts) is in place. Everything that knows about *this specific game*
+> still contains Need for Speed: Most Wanted's addresses and code, and has to be re-derived from Call of Duty 2's own
+> `default.xex`. **No NRO builds yet.**
 
-> [!NOTE]
-> You need your own copy of the Xbox 360 game: a disc image (`.iso`) or the extracted disc with its `default.xex`.
+## What Call of Duty 2 is, technically
 
-## Supported editions
+Measured from the retail disc (`default.xex`, Title ID `415607D1`):
 
-One NRO per edition of the game (the installer page picks the right one automatically):
-
-| File | Edition |
+| | |
 |---|---|
-| `nfsmw-nx-pal-es.nro` | PAL - Spanish & Brazilian Portuguese (Fan Version) |
-| `nfsmw-nx-pal-en.nro` | PAL - English & Russian (Fan Version) |
-| `nfsmw-nx-pal-fr.nro` | PAL - French |
-| `nfsmw-nx-pal-de.nro` | PAL - German |
-| `nfsmw-nx-pal-it.nro` | PAL - Italian |
-| `nfsmw-nx-pal-pl.nro` | PAL - Polish (Fan Version) |
-| `nfsmw-nx-usa.nro` | NTSC-U |
-| `nfsmw-nx-jpn.nro` | NTSC-J |
-| `nfsmw-nx-kor.nro` | NTSC-K - Korean |
-| `nfsmw-nx-cht.nro` | NTSC - Asia, Traditional Chinese |
+| Engine | Infinity Ward 3.0 |
+| Image base | `0x82000000`, entry point `0x8228BAB0` |
+| `.text` | `0x82090000` – `0x82495E14`, 4,218,388 bytes (4.0 MB), 11,082 functions in `.pdata` |
+| XEX packing | AES-128, basic compression, 3 blocks |
+| Imports | `xboxkrnl.exe` (325 records), `xam.xex` (256 records) |
+| Assets | all inside `.ff` fastfiles (zlib, stream starts at `+0x14`) |
+| Video | Bink (`.bik`) — `cod2_intro.bik` is 182 MB, `cod2_attract.bik` 191 MB |
+| Audio | XMA and IMA ADPCM |
+| Shaders | no loose files; 108 valid Xenos shader containers found inside the fastfiles |
 
-## How to install
+These numbers come from one pass over the retail disc. Re-read them from the XEX header of your own copy before
+declaring any address: the code generator rejects anything outside the image, and a stale address is the most common
+cause of a confusing error.
 
-1. Open the installer page: **https://stevensnd.github.io/nfsmw-nx-installer/**
-2. Choose your format (**Disc image (.iso)** or **XEX format**, the folder with `default.xex`, `Movies` and `NFS`)
-   and press **Create nfsmw-nx.zip**. Everything runs in your browser and the game files never leave your
-   computer: the page detects your edition, downloads its build and makes the shaders from your disc.
-3. Extract the downloaded `nfsmw-nx.zip` into `sdmc:/switch/`.
+Two things here differ from the game this fork came from, and both need new work: the cutscenes are **Bink** rather
+than WMV3, and the shaders live **inside compressed fastfiles** rather than in files a scanner can walk.
 
-Your `nfsmw-nx` folder should look like this:
+## What is reused from nfsmw-nx
 
-```text
-/switch/nfsmw-nx/
-  nfsmw-nx.nro
-  nfsmw.toml                (settings)
-  nfsmw_shaders.nfsp        (the game's shaders, made from your disc)
-  game_root/                (the files of your disc)
-```
+| Path | State |
+|---|---|
+| `sdk/` — Horizon layer, memory, threads, crash handling, clocks, audio output, ReXGlue with the Switch changes | Reusable as is |
+| `mesa/` — the NVK driver patch and its build script | Reusable as is |
+| `shaders/` — XenosRecomp, the 2005 shader container reader, the packer, the WebAssembly tools | Reusable; the container format matches |
+| `tools/` — third-party fetch, direct calls, gap finder, literal copies, build scripts | Reusable; game-specific addresses come from configuration |
+| `app/` — the CMake project and the renderer skeleton | **Not usable yet**: its hooks, native replacements and addresses belong to the other game |
 
-Launch with a game override (hold **R** while starting an installed title) or a forwarder. Album applet mode does
-not provide enough memory. If you use a forwarder, set it to a **39-bit address space**.
+## State of this fork
 
-I suggest using the latest version of [Sphaira](https://github.com/NaGaa95/sphaira) to generate the forwarder.
+Done and verified on Windows (see [docs/building.md](docs/building.md)):
 
-Finally **CHECK [THIS SCREENSHOT](https://i.imgur.com/W4hpDcY.jpeg)** to know which options you must use to generate
-the forwarder.
+- **Renamed** every `nfsmw_*` / `Nfsmw*` / `NFSMW*` file, symbol and identifier to `cod2`. 87 files renamed, 154
+  rewritten. The one deliberate survivor is the build string `NfsMWEurope...Release` in
+  [docs/editions.md](docs/editions.md), which is what the game itself reports.
+- **Rewrote [README.md](README.md)**, [pgo/README.md](pgo/README.md) and the parts of
+  [docs/building.md](docs/building.md) that named the other game.
+- **Deleted the inherited PGO profiles** (1,328 `.gcda` files under `pgo/`). A GCC profile matches functions by a
+  fingerprint of their name, and every recompiled function is named after its guest address, so the old profiles can
+  never match this game. `pgo/` is empty on purpose.
+- **Neutralised the inherited address tables.** The entries in `app/overrides.toml` and all of `app/huecos.toml` are
+  the other game's addresses; `huecos.toml` is no longer included by the manifest and the `overrides.toml` entries are
+  commented out, with the explanations kept as a checklist of what to look for.
+- **Fixed the linker script.** `app/orden_funciones.ld` matches symbols by their mangled C++ name, and the rename
+  changed the length prefix (`_ZN5cod2` → `_ZN4cod2`, `_ZN8Cod2App` → `_ZN7Cod2App`). 39 entries corrected. A wrong
+  length does not fail the build — it silently stops matching — so this one is worth knowing about.
+- **Set the Title ID** the extractor expects to `415607D1` (single player), with a secondary branch for `415607DA`
+  (`default_mp.xex`).
+- **Repointed the installer links** to `fenndooscar/cod2-nx-installer`.
+- **Fixed the third-party fetch** (`tools/fetch_thirdparty.py`): it now leaves a `.git` marker in each vendored
+  library, which the SDK's CMake requires, and it turns the symbolic links Git writes as text files on Windows
+  (libmspack, MoltenVK) into real copies. Without both, step 1 left a tree that could not be configured or compiled.
+- **Fixed the code generator build**: the SDK's x86-64 code uses SSSE3/SSE4.1 intrinsics that clang does not enable by
+  default, so `sdk/CMakeLists.txt` now adds `-msse4.1` for the SDK's own libraries. `cmake --build out/host --target
+  rexglue` now succeeds with clang 23.1.3 and produces `sdk/out/win-amd64/rexglue.exe`.
+- **Kept the repository clean**: `.gitignore` now excludes the ~19,000 vendored files step 1 downloads, so only the
+  seven files this port actually changes under `sdk/thirdparty/` are tracked.
 
-> [!NOTE]
-> **Updating:** open the installer page again and press **Create nfsmw-nx-update.zip**. It only rebuilds
-> `nfsmw-nx.nro`, `nfsmw.toml` and `nfsmw_shaders.nfsp`, so there is no need to copy the game files again: extract
-> it over your existing folder.
+Not done, in the order they have to happen:
 
-> [!CAUTION]
-> **The first race after** installing or updating compiles the graphics pipelines it has not seen yet, so **IT CAN STUTTER
-> for a few seconds**. They are saved on the SD card and later sessions start smoothly.
+1. **Fetch the third-party sources**: `python tools/fetch_thirdparty.py` (step 1).
+2. **Extract the disc** with `tools/fase1_extraer.py` (step 2).
+3. **Run the code generator on `default.xex`** and read the import line in `app/codegen.log` first: it must report a
+   non-zero number of resolved imports. CoD2's import table does not set the record-type byte the SDK currently looks
+   at, so this is the first thing that can block everything.
+4. **Re-derive `app/overrides.toml` and `app/huecos.toml`** for CoD2's addresses (its `.text` ends at `0x82495E14`).
+5. **Get it running on a PC** with ReXGlue's own emulated GPU before touching the Switch.
+6. **Replace the app's game-specific code** (`app/src/cod2_*.cpp`): the hooks, the D3D trace, the native renderer,
+   the audio server — all of it is still the other game's.
+7. **Build the NVK driver** (`mesa/README.md`) and produce a first NRO.
+8. **Add a Bink path** over FFmpeg for the cutscenes, and the matching FFmpeg decoders
+   (`sdk/thirdparty/FFmpeg/config_cod2_wmv3.h` is still a WMV3 configuration).
+9. **Unpack the `.ff` fastfiles** before scanning for shader containers, then build `cod2_shaders.nfsp`.
+10. **Record a PGO profile** on the console.
 
-## Controls
+## Requirements
 
-Each Switch button acts as the Xbox 360 button with the same letter, so the letter in the on-screen prompts is the
-button to press: **A** accepts and **B** goes back, as in other Switch games.
+Everything below is needed for steps 1–6. Verified installed on the machine this fork was prepared on:
 
-<div align="center">
+| Need | For | State |
+|---|---|---|
+| [devkitPro](https://devkitpro.org) with devkitA64 and libnx at `C:/devkitPro` | step 6 (the NRO) | installed, `[SwitchDev] Enabled=1` |
+| CMake 3.25+ | steps 4, 6 | installed (4.4.4) |
+| Ninja, Git, Python 3.10+ | steps 1–6 | installed |
+| **Clang 20+ on `PATH`** | step 4 (the code generator) | installed at `C:\Program Files\LLVM\bin` — **add it to `PATH` by hand**, the LLVM installer does not |
+| **MSYS2 with the MINGW64 toolchain, meson, ninja, pkg-config, python** | step 3 (the Mesa driver) | **not installed**: `C:\msys64` exists but has only the base packages |
+| **Rust with the `aarch64-unknown-linux-gnu` target** | step 3 (NVK's shader compiler is Rust) | Rust is installed, the cross target is **not** |
+| Vulkan SDK | step 7 (DXC, spirv-val) | installed (1.4.363.0); add `Bin` to `PATH` or set `VULKAN_SDK` |
+| MinGW g++ | step 7 | not installed |
+| Emscripten | rebuilding the browser tools | not installed (optional) |
+| Your own copy of Call of Duty 2 for Xbox 360 | everything | you must provide it |
 
-| Switch | Xbox 360 |
-| --- | --- |
-| A | A |
-| B | B |
-| X | X |
-| Y | Y |
-| ZR / ZL | RT / LT |
-| R / L | RB / LB |
-| + | Start |
-| − | Back |
-| Sticks / D-pad | Sticks / D-pad |
+About 16 GB of RAM for the final optimization step. CoD2's `.text` is 4.0 MB against the other game's 13 MB, so this
+should be lighter, but it has not been measured yet.
 
-</div>
+The full, step-by-step build instructions are in [docs/building.md](docs/building.md). Steps 1, 2, 4 and 5 are
+accurate for this game as they stand; step 3 and step 7 describe the other game's toolchain and are correct about it.
 
-To use the face buttons by position instead, as on an Xbox pad (B acts as A, A as B, Y as X and X as Y), set
-`input_xbox_layout = true` in `nfsmw.toml`.
-
-## Settings
-
-`nfsmw.toml`, next to the NRO, holds the settings and each one is described in the file. Several of them can also be
-changed while playing from the Debug Menu (L + R + Right).
-
-### Color filter (the "piss filter")
-
-The game's "visual treatment", which players call the "piss filter", gives the city its yellow tint, with some
-desaturation and a dark vignette. To make it softer or turn it off, change `nfsmw_tratamiento_visual` in
-`nfsmw.toml`, or in the Debug Menu (L + R + Right, category **Graficos**) while playing:
-
-- `original` (default): as on the Xbox 360;
-- `suave`: half as strong;
-- `apagado`: no filter. The glow and the fades to black stay the same.
-
-It costs nothing.
-
-## Debug Menu
-
-**It's only available in Spanish for now.** Press **L + R + Right** (D-pad) while playing to open it and again to close it.
-It can be used with the Joy-Con, moving with the D-pad and scrolling with the left stick, or with the touch screen.
-While it is open, the controls go to the menu and not to the game.
-
-- **Search box** at the top: finds a setting by its name or description.
-- **Categories** on the left and the settings of the selected one on the right, each with its value (a checkbox, a
-  list or a number). The color of the name tells when a change takes effect: green at once, yellow after restarting
-  the game, and red is read-only.
-- **Save to config** at the bottom: writes the changes to `nfsmw.toml` so they are kept. It rewrites the file with only
-  the settings that differ from the program's defaults, without its comments. Without saving, the changes last until
-  you close the game.
-
-The categories:
-
-- **Graficos**: internal resolution, frame rate limit (60 or 30), the GPU clock requested in handheld mode, FXAA
-  antialiasing, the sky glow, the game's color filter, and the options for the console overlays (SaltyNX) and
-  ReverseNX-RT.
-- **Graficos > Posproceso**: color filters for the final image, as presets (`cine`, `sepia`, `noir`, `frio`,
-  `calido`, `vivo`, `matrix`, `crt`) or `personalizado` with your own brightness, contrast, saturation, vibrance,
-  temperature, gamma, vignette and scanlines.
-- **NFSMW**: the port's own settings: renderer, shadows, reflections, streaming, audio, the game functions that run as
-  native code, and diagnostics. Many of them are described in `nfsmw.toml`; change them only to try something.
-- **The rest** (Audio, GPU, Input, Kernel, Log, UI...) come from the ReXGlue SDK and are mostly for development and
-  debugging.
-
-> [!NOTE]
-> To see the FPS, the resolution and information about the clocks, Horizon OC Monitor is a better choice: it shows more
-> information than the Debug Menu currently does.
-
-## Resolution
-
-The resolution is automatic by default (`nfsmw_resolucion_interna = "automatico"`): **1280x720** in handheld mode and
-**1920x1080** docked. It's chosen when the game starts: if you dock or undock the console while playing, the game keeps
-the resolution, scaled to the screen until you restart it. ReverseNX-RT's Fake Docked and Fake Handheld count as well:
-choose the mode in its overlay and restart the game. The choice is kept until you restart the console.
-
-To use one resolution in both modes, set it in `nfsmw.toml` (or in the Debug Menu, category **Graficos**, then
-**Save to config**) and restart the game:
-
-- `1280x720`: the resolution of the Xbox 360 version. Docked, it can give a higher frame rate than `1920x1080`, which
-  has 2.25 times the pixels while the docked GPU clock is only 1.67 times the handheld one.
-- `1920x1080`: sharper, at a high GPU cost, above all in handheld mode.
-- `1024x576`, `640x360` and `640x480` only shrink the image after it is drawn at 1280x720, so they do not raise the
-  frame rate.
-
-> [!NOTE]
-> If you're having bad performance on Docked and don't want to apply a higher OC + you want more FPS, set the resolution to 1280x720.
-
-## Performance
-
-In handheld mode the port asks the system for its official 460.8 MHz GPU mode, a standard performance configuration
-of the console and not an overclock. Races average 32 to 35 FPS; the heaviest area measured, the exit of Heritage
-Heights, runs at 21-22 FPS for about 20 seconds.
-
-How it went from a few frames per second to this is explained step by step in
-[docs/performance-history.md](docs/performance-history.md).
-
-## Overclocking
-
-The port is made to run at the console's stock clocks **with no overclock**. These are the clocks it runs at by default:
-
-<div align="center">
-
-| Mode | CPU | GPU | Memory |
-| --- | --- | --- | --- |
-| Handheld | 1020 MHz | 460.8 MHz | 1331.2 MHz |
-| Docked | 1020 MHz | 768 MHz | 1600 MHz |
-
-</div>
-
-**[GAMEPLAY USING THE DEFAULT CLOCKS](https://youtu.be/xtk1l8mpr4o?si=a5XEbRV5VwV_Ym1O)**
-
-The CPU is what limits it most (the game runs
-on three cores at 1020 MHz) and in handheld mode the GPU as well.
-
-> [!CAUTION]
-> Overclocking pushes the console beyond what it was designed for and you do it at your own risk. An unstable memory
-> overclock can corrupt the NAND or the SD card: make a backup first and test every change.
-
-These guides explain how to do it:
-
-- **[How to get 60 FPS](https://rentry.org/howtoget60fps)**: the tools you need (Horizon OC, Ultrahand, Status
-  Monitor...) and how to set them up.
-- **[Mariko guide](https://rentry.co/mariko)**: overclocking the Switch V2, Lite and OLED.
-- **[Erista guide](https://rentry.co/erista)**: overclocking the original 2017 Switch.
-- **[How to test stability](https://rentry.co/howtoteststability)**: how to check that your CPU, GPU and memory clocks
-  are stable.
-
-For this port:
-
-- In Horizon OC, set the clocks with **Edit App Profile** while the game is running. The App ID is the one of the game
-  you hold **R** on to launch it, or your forwarder's.
-- Status Monitor shows the port's frame rate and resolution if SaltyNX is installed ([how it works](docs/console-overlays.md)).
-
-## How it works
-
-- **The game's code is translated, not emulated.** [ReXGlue](https://github.com/rexglue/rexglue-sdk) translates every
-  function of the game's program (`default.xex`) to C++, which is then compiled for the Switch. ReXGlue also gives the
-  game what it expects from an Xbox 360: its system, files, audio and controllers. This port adds the Switch part:
-  memory, threads, crash handling, clocks, audio output and showing the frames on screen.
-- **Its own renderer.** Imitating the Xbox 360 GPU was far too slow on the Switch. Instead, the port reads the list of
-  commands the game sends to the GPU and draws the same frame with Vulkan. The busiest parts of the game's graphics
-  code run as native code, each one checked against the original.
-- **Shaders translated beforehand.** The game's GPU programs (shaders) are translated with
-  [XenosRecomp](https://github.com/hedge-dev/XenosRecomp) and DXC into one library file. The installer page does this
-  from your disc.
-- **Its own graphics driver.** Vulkan runs on NVK, from the Mesa project, through
-  [mesa-switch](https://github.com/danfromtico/mesa-switch), with this port's changes in `mesa/`: skipping hidden
-  pixels (ZCULL), shader compiler fixes and cheaper draws.
-- **Optimization.** The code is built with LTO, PGO and function ordering, the CPU cost of each draw is cut down, the
-  busiest game functions run as native code, and the GPU time per frame is reduced. The few changes that alter the
-  image (a cheaper shadow filter, no radial blur on the final image, no vegetation in the shadow maps) are settings in
-  `nfsmw.toml`.
-
-> [!NOTE]
-> The PGO profile is not complete. It comes from a small test on the console, done only to check that PGO improves the
-> port's performance, not from playing through the whole game.
-
-## Documentation
-
-For anyone porting another Xbox 360 game, or curious about how this one was done. **Start with
-[docs/README.md](docs/README.md)**: it explains in six steps how the whole port fits together, and what to read for
-what you want to do. Every technical word is explained in the [glossary](docs/glossary.md).
-
-<div align="center">
-
-| Document | What it explains |
-| --- | --- |
-| [docs/glossary.md](docs/glossary.md) | Every technical word, in plain words |
-| [docs/building.md](docs/building.md) | How to build the NRO, the driver and the shader library, step by step |
-| [docs/porting-another-game.md](docs/porting-another-game.md) | What you can reuse for another game, and in which order to work |
-| [docs/native-renderer.md](docs/native-renderer.md) | How the port draws the game with Vulkan |
-| [docs/shaders.md](docs/shaders.md) | How the game's shaders are translated, and what had to be fixed |
-| [docs/toolchain.md](docs/toolchain.md) | How the game's code is translated and compiled, and the build options that make it faster |
-| [docs/mesa.md](docs/mesa.md) | The graphics driver and this port's changes to it |
-| [docs/platform-notes.md](docs/platform-notes.md) | Things about the Switch system that cost a lot of time to find out |
-| [docs/audio-and-video.md](docs/audio-and-video.md) | The game's audio and cutscenes on the Switch |
-| [docs/editions.md](docs/editions.md) | How every edition and language of the game is supported |
-| [docs/measuring.md](docs/measuring.md) | How to measure performance on the console without being misled |
-| [docs/performance-history.md](docs/performance-history.md) | How the frame rate went from a few FPS to about 30, step by step |
-
-</div>
-
-## Build
-
-devkitA64 and libnx from [devkitPro](https://devkitpro.org), CMake, Ninja, Python, the Vulkan driver built from
-[mesa-switch](https://github.com/danfromtico/mesa-switch) with `mesa/mesa-switch-nfsmw.patch`, and your own copy of
-the game for the code generator. The whole process is in [docs/building.md](docs/building.md).
-
-<div align="center">
+## Layout
 
 | Folder | Contents |
-| --- | --- |
-| `app/` | The game: hooks, native renderer, audio, video, configuration, CMake project |
+|---|---|
+| `app/` | The game tree: CMake project, configuration, hooks, renderer, audio, video |
 | `sdk/` | ReXGlue SDK with the Horizon layer and the code generator changes |
 | `shaders/` | XenosRecomp with this port's changes, the library tools and their WebAssembly builds |
-| `mesa/` | The patch for mesa-switch |
-| `pgo/` | The profiles for profile guided optimization, one per edition |
+| `mesa/` | The patch for mesa-switch, and its build script |
+| `pgo/` | Profile guided optimization profiles, one folder per edition (empty for now) |
 | `tools/` | Code generation steps, build scripts, edition support |
 | `docs/` | Documentation |
 
-</div>
+## Documentation
+
+Start with [docs/README.md](docs/README.md). It explains how the whole port fits together, and every technical word
+is in the [glossary](docs/glossary.md). The documents describe the inherited port, so read them as a guide to the
+machinery rather than as a description of this game.
 
 ## Credits
 
-- **Electronic Arts and EA Black Box** — creators of Need for Speed: Most Wanted. This is an unofficial, fan-made
-  port with no affiliation.
+- **Activision and Infinity Ward** — creators of Call of Duty 2. This is an unofficial, fan-made port with no
+  affiliation.
+- **[StevensND](https://github.com/StevensND/nfsmw-nx)** — nfsmw-nx, the port this repository is forked from. The
+  Switch layer, the Mesa patch, the shader tooling and the build scripts are that project's work.
 - **[madelrandel-blip](https://github.com/madelrandel-blip/NFSMW-Recompiled)** — NFSMW Recompiled, the recompilation
-  project this port started from.
+  project nfsmw-nx started from.
 - **[Tom Clay](https://github.com/rexglue/rexglue-sdk)** — the ReXGlue SDK, built on the work of the
   **[Xenia](https://xenia.jp)** team.
 - **[hedge-dev](https://github.com/hedge-dev/XenosRecomp)** — XenosRecomp, the Xenos shader translator.
@@ -285,21 +151,12 @@ the game for the code generator. The whole process is in [docs/building.md](docs
 - **[devkitPro](https://devkitpro.org) and [switchbrew](https://github.com/switchbrew/libnx)** — devkitA64 and libnx.
 - The other libraries listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-## Support
-
-**[HERE](https://linktr.ee/stevensmods)** are my social media
-
-If you enjoy my work and want to support me:
-
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/stevenss)
-
 ## Legal
 
-No affiliation with Electronic Arts. "Need for Speed" and "Need for Speed: Most Wanted" are trademarks of Electronic
-Arts Inc. This repository contains no assets or program code from the original game. Users must provide their own
-legally obtained copy, and the installer page makes the package from it on their own computer. Running homebrew
-requires custom firmware, which violates Nintendo's ToS and can get a console banned — your call.
+No affiliation with Activision. "Call of Duty" is a trademark of Activision Publishing, Inc. This repository
+contains no assets or program code from the original game. Users must provide their own legally obtained copy.
+Running homebrew requires custom firmware, which violates Nintendo's ToS and can get a console banned — your call.
 
-Source code is provided under the GPL-3.0 License (see [LICENSE](LICENSE)), inherited from NFSMW Recompiled. The SDK
-changes are under the SDK's BSD-3-Clause license and the shader translator and Mesa changes under MIT, so other ports
-can reuse them (see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
+Source code is provided under the GPL-3.0 License (see [LICENSE](LICENSE)), inherited through nfsmw-nx from NFSMW
+Recompiled. The SDK changes are under the SDK's BSD-3-Clause license and the shader translator and Mesa changes
+under MIT, so other ports can reuse them (see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).

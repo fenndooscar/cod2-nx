@@ -1,7 +1,7 @@
-// nfsmw - ReXGlue Recompiled Project
+// cod2 - ReXGlue Recompiled Project
 
-#include "generated/default/nfsmw_init.h"
+#include "generated/default/cod2_init.h"
 
-#include "nfsmw_app.h"
+#include "cod2_app.h"
 
-REX_DEFINE_APP(nfsmw, NfsmwApp::Create)
+REX_DEFINE_APP(cod2, Cod2App::Create)

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NFSMW Recomp - phase 1: extract the Xbox 360 ISO and dump the XEX info.
+COD2 Recomp - phase 1: extract the Xbox 360 ISO and dump the XEX info.
 
 No dependencies: only the Python 3.8+ standard library.
 
 Typical usage:
-    python tools/fase1_extraer.py "D:\\dumps\\NFSMW.iso" --listar
-    python tools/fase1_extraer.py "D:\\dumps\\NFSMW.iso" -o assets/game_root
+    python tools/fase1_extraer.py "D:\\dumps\\COD2.iso" --listar
+    python tools/fase1_extraer.py "D:\\dumps\\COD2.iso" -o assets/game_root
     python tools/fase1_extraer.py assets/game_root/default.xex --info
 
 What it does:
@@ -331,10 +331,12 @@ def info_xex(ruta):
                   % (clave, nombre, opcionales[clave]))
 
         print()
-        if title_id == 0x454107D9:
-            print("  >> Title ID coincide con Need for Speed: Most Wanted (2005). Correcto.")
+        if title_id == 0x415607D1:
+            print("  >> Title ID coincide con Call of Duty 2 (Xbox 360, USA/Europa). Correcto.")
+        elif title_id == 0x415607DA:
+            print("  >> Title ID es el de Call of Duty 2 (multijugador). Necesitas el default.xex.")
         elif title_id is not None:
-            print("  >> OJO: el Title ID esperado para NFSMW 2005 es 454107D9.")
+            print("  >> OJO: el Title ID esperado para Call of Duty 2 es 415607D1.")
             print("     Este XEX es 0x%08X. Comprueba que dumpeaste el juego correcto." % title_id)
 
         print()

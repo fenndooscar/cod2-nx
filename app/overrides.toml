@@ -1,12 +1,16 @@
 # ============================================================================
-#  NFSMW Recomp - manual declarations for the codegen
+#  COD2 Recomp - manual declarations for the codegen
 #
-#  Included from nfsmw_manifest.toml via includes = ["overrides.toml"].
+#  Included from cod2_manifest.toml via includes = ["overrides.toml"].
 #  Included files use the flat schema (sections at the root), not the one
 #  nested under [entrypoint] in the manifest.
 #
-#  Valid address range: 0x82000000 - 0x82CD0000
-#  (image base 0x82000000 + 13,434,880 bytes of image)
+#  NOT REVIEWED YET. The addresses below and in huecos.toml are the ones of
+#  Need for Speed: Most Wanted, the port this repository is forked from. None
+#  of them belong to Call of Duty 2, whose program is a different one with
+#  different addresses. The range in this comment (base + image size) is the
+#  old game's too: take the real one from the XEX header before trusting any
+#  "outside the image" message from the code generator.
 # ============================================================================
 
 # ----------------------------------------------------------------------------
@@ -66,13 +70,13 @@ ctr_as_local = true
 # safe in functions that do not use __savegprlr / __restgprlr (otherwise the caller would reload
 # values that were never restored). Verified in the generated code: neither of the two uses them
 # or touches r14-r31.
-#   sub_828531E8: audio server wait (nfsmw_audio_servidor.cpp reads ctx.r31).
-#   sub_82589DF0: cutscenes (nfsmw_video_bridge.cpp reads r25, r27, r31; PC only).
+#   sub_828531E8: audio server wait (cod2_audio_servidor.cpp reads ctx.r31).
+#   sub_82589DF0: cutscenes (cod2_video_bridge.cpp reads r25, r27, r31; PC only).
 # sub_82593A10 (DrawVertices) is not marked: it uses savegpr/restgpr and would break the caller.
-# Its read of r31 in nfsmw_d3d_trace.cpp is inside NFSMW_NATIVE_SHADER_LIBRARY,
+# Its read of r31 in cod2_d3d_trace.cpp is inside COD2_NATIVE_SHADER_LIBRARY,
 # which is off on the Switch.
-"0x828531E8" = { share_registers = true }
-"0x82589DF0" = { share_registers = true }
+# NOT CoD2: "0x828531E8" = { share_registers = true }
+# NOT CoD2: "0x82589DF0" = { share_registers = true }
 
 # Function chunks that read registers of their parent function. The analyzer splits some
 # game functions in two (the tail is declared in huecos.toml, or it finds it by itself);
@@ -82,32 +86,32 @@ ctr_as_local = true
 # (emit_call_sharing_registers) make the function that jumps pass its registers through ctx.
 # List generated with tools/lee_antes.py (reads before writes in the generated code); the ones
 # in huecos.toml carry the mark on their own line.
-"0x82636A50" = { share_registers = true }
-"0x82636A60" = { share_registers = true }
-"0x82638AD0" = { share_registers = true }
-"0x82639120" = { share_registers = true }
-"0x8263CA88" = { share_registers = true }
-"0x8263FDF8" = { share_registers = true }
-"0x8263FEB0" = { share_registers = true }
-"0x82640680" = { share_registers = true }
-"0x8269D410" = { share_registers = true }
-"0x8269E700" = { share_registers = true }
-"0x8269E710" = { share_registers = true }
-"0x826BF370" = { share_registers = true }
-"0x82801B40" = { share_registers = true }
-"0x828B9950" = { share_registers = true }
-"0x828B9CF8" = { share_registers = true }
-"0x828B9FB8" = { share_registers = true }
-"0x828BA220" = { share_registers = true }
-"0x828BA388" = { share_registers = true }
-"0x828BC318" = { share_registers = true }
+# NOT CoD2: "0x82636A50" = { share_registers = true }
+# NOT CoD2: "0x82636A60" = { share_registers = true }
+# NOT CoD2: "0x82638AD0" = { share_registers = true }
+# NOT CoD2: "0x82639120" = { share_registers = true }
+# NOT CoD2: "0x8263CA88" = { share_registers = true }
+# NOT CoD2: "0x8263FDF8" = { share_registers = true }
+# NOT CoD2: "0x8263FEB0" = { share_registers = true }
+# NOT CoD2: "0x82640680" = { share_registers = true }
+# NOT CoD2: "0x8269D410" = { share_registers = true }
+# NOT CoD2: "0x8269E700" = { share_registers = true }
+# NOT CoD2: "0x8269E710" = { share_registers = true }
+# NOT CoD2: "0x826BF370" = { share_registers = true }
+# NOT CoD2: "0x82801B40" = { share_registers = true }
+# NOT CoD2: "0x828B9950" = { share_registers = true }
+# NOT CoD2: "0x828B9CF8" = { share_registers = true }
+# NOT CoD2: "0x828B9FB8" = { share_registers = true }
+# NOT CoD2: "0x828BA220" = { share_registers = true }
+# NOT CoD2: "0x828BA388" = { share_registers = true }
+# NOT CoD2: "0x828BC318" = { share_registers = true }
 
 # Two tail calls (b, unconditional branch) point here from 0x8286931C and
 # 0x82866664, but automatic discovery never created a function at this
 # address. Result: the Validate phase fails with
 #   UnresolvedCall: 0x8285CE80 - target not in any function
 # Declaring it as an entry point is enough; Discover works out the bounds.
-"0x8285CE80" = { }
+# NOT CoD2: "0x8285CE80" = { }
 
 # 104-byte gap after the end of sub_824EDE88 (which ends at 0x824EDEA8)
 # and before the next function at 0x824EDF10. There is real code in there:
@@ -115,7 +119,7 @@ ctr_as_local = true
 #   0x824EDEB0 -> 0x824EDED4   and   0x824EDEC0 -> 0x824EDECC
 # because their source was in no man's land. With the start declared, Discover
 # claims the whole block and the branches become internal.
-"0x824EDEB0" = { share_registers = true }
+# NOT CoD2: "0x824EDEB0" = { share_registers = true }
 
 # The one that broke startup:
 #   [FATAL] Call to invalid or unregistered function at guest address 0x826BE258
@@ -123,28 +127,28 @@ ctr_as_local = true
 # ends right at 0x826BE258. Between that end and the next function, at
 # 0x826BE260, there are 8 unclaimed bytes that something calls indirectly
 # (which is why the Validate phase did not complain: it only checks direct b/bl branches).
-"0x826BE258" = { }
+# NOT CoD2: "0x826BE258" = { }
 
 # Same pattern, next crash:
 #   [FATAL] Call to invalid or unregistered function at guest address 0x8215FEA8
 # 8-byte gap between the end of sub_8215FE90 and the function at 0x8215FEB0,
 # in an area full of 8- and 16-byte functions (a thunk table).
-"0x8215FEA8" = { }
+# NOT CoD2: "0x8215FEA8" = { }
 
 # The only address that showed up in the full survey (REXGLUE_SURVEY=1), with the
 # game already running its main loop and feeding audio. In other words: with this one,
 # no known unresolved indirect call remains.
-"0x8285CB90" = { }
+# NOT CoD2: "0x8285CB90" = { }
 
 # It appeared once graphics were working, on the loading screen. The previous survey
 # missed it because, with the state corrupted by the missing functions, the game never
 # got this far. Every time the game reaches new code more can show up: they are
 # indirect call targets, invisible to static analysis.
-"0x8220C090" = { }
+# NOT CoD2: "0x8220C090" = { }
 
 # In the same neighborhood as 0x8285CE80, whose callers were at 0x8286931C
 # and 0x82866664. The whole 0x8285xxxx-0x8286xxxx area looks like a thunk table.
-"0x82869668" = { }
+# NOT CoD2: "0x82869668" = { }
 
 # 0x8262E768 - removed. Do not declare it. The full explanation, because the
 # error will come back if someone tries the build with a different ISO:
@@ -174,15 +178,15 @@ ctr_as_local = true
 # Another indirect call target, invisible to static analysis. It only showed up
 # once the floating-point fix let the game get this far: each new stretch the
 # game reaches can uncover more.
-"0x8212F670" = { }
+# NOT CoD2: "0x8212F670" = { }
 
 # More keep appearing in the same prologue cutscene, one per run.
 # It is the usual pattern: indirect call targets invisible to static
 # analysis, which only show up when the game takes that path.
 # 0x824B1640 came up with the Release build, 0x823EB808 with the Debug one: they are
 # different paths through the same stretch, not a difference between builds.
-"0x824B1640" = { }
-"0x823EB808" = { }
+# NOT CoD2: "0x824B1640" = { }
+# NOT CoD2: "0x823EB808" = { }
 
 # ----------------------------------------------------------------------------
 #  JUMP TABLES
@@ -302,7 +306,7 @@ ctr_as_local = true
 # Written and removed by tools/rendimiento.py. Do not edit by hand.
 
 [rexcrt]
-memcpy = 0x826BE1B0
+# NOT CoD2: memcpy = 0x826BE1B0
 # The rest of the hot CRT, identified by reading the generated PowerPC.
 #   memset  0x826BE610: 1,109 call sites. Bytes until aligned, words with the byte replicated,
 #           bytes at the end; size 0 writes nothing and r3 is untouched = std::memset.
@@ -315,8 +319,8 @@ memcpy = 0x826BE1B0
 # Native implementations checked in sdk/src/kernel/crt (memory.cpp:77-78, string.cpp:242).
 # Rejected on risk/benefit: memmove_s (differs in error handling), strstr/strchr/strrchr/strncmp/_stricmp
 # (few uses).
-memset = 0x826BE610
-memmove = 0x826BDD90
-strncpy = 0x826B9660
+# NOT CoD2: memset = 0x826BE610
+# NOT CoD2: memmove = 0x826BDD90
+# NOT CoD2: strncpy = 0x826B9660
 
 # --- fin RENDIMIENTO rexcrt ---

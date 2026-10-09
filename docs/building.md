@@ -2,7 +2,7 @@
 
 ## In short
 
-Players do not need this page: the [installer page](https://stevensnd.github.io/nfsmw-nx-installer/) makes the package
+Players do not need this page: the [installer page](https://fenndooscar.github.io/cod2-nx-installer/) makes the package
 from their own copy of the game, with the released NROs. This page is for building the NRO (the Switch program) and
 the shader library yourself, from the source code in this repository.
 
@@ -17,13 +17,17 @@ the driver build is tied to Windows; other systems should work, but nobody has t
 
 - [devkitPro](https://devkitpro.org/wiki/Getting_Started), with devkitA64 (the compiler for the Switch) and libnx (the
   Switch library). It installs to `C:/devkitPro`; if you put it somewhere else, set the `DEVKITPRO` environment
-  variable to that folder.
-- CMake 3.25 or newer, Ninja, Git, and Python 3.10 or newer.
-- A C++ compiler for your PC, to build the code generator. Clang 20 or newer was used.
-- Your own copy of Need for Speed: Most Wanted for Xbox 360 (an ISO or the extracted files). Nothing from the game is
-  in this repository, and nothing made from it may be added to it.
-- About 16 GB of RAM. The translated game code is big (about 144 MB of C++), and the final optimization step
-  ([LTO](glossary.md#lto)) alone takes about ten minutes.
+  variable to that folder. The installer also leaves `DEVKITPRO=/opt/devkitpro` in the machine environment, which is
+  the path the MSYS2 shell uses and does not exist for a native Windows program; the toolchain file ignores it when it
+  does not point at a real `libnx/switch.specs`, so the usual location works without you doing anything.
+- CMake 3.25 or newer, Ninja, Git, and Python 3.10 or newer, all three on `PATH` (they are run by name).
+- A C++ compiler for your PC, to build the code generator. Clang 20 or newer was used. **The LLVM installer does not
+  add `C:\Program Files\LLVM\bin` to `PATH`**, so `clang` will not be found in a new shell until you add it by hand.
+  This is the one thing people trip over first; the build stops with `CMAKE_C_COMPILER not set`.
+- Your own copy of Call of Duty 2 for Xbox 360 (an ISO or the extracted files). Nothing from the game is in this
+  repository, and nothing made from it may be added to it.
+- About 16 GB of RAM. The translated game code is big, and the final optimization step ([LTO](glossary.md#lto)) alone
+  takes about ten minutes.
 
 Only if you need them:
 
@@ -41,28 +45,37 @@ Only if you need them:
 python tools/fetch_thirdparty.py
 ```
 
-It downloads the rest, and it never overwrites a file that is already there, so the port's changes stay.
+It downloads the rest, and it never overwrites a file that is already there, so the port's changes stay. Two things it
+also does, both needed to make the tree buildable: it leaves a `.git` marker in each vendored library (the SDK's CMake
+refuses to configure without one), and it replaces the symbolic links Git writes as small text files on Windows
+(`libmspack`, `MoltenVK`) with real copies. On a first run it reports about 18,900 files copied; a second run reports
+`0 files copied` and is harmless.
 
 ## 2. Extract the game
 
 **Why:** the code generator needs the game's program, `default.xex`, and the port needs the game files.
 
 ```sh
-python tools/fase1_extraer.py path/to/NFSMW.iso -o assets/game_root
+python tools/fase1_extraer.py path/to/COD2.iso -o assets/game_root
 ```
 
 This extracts the disc into `assets/game_root` ("fase1_extraer" means "phase 1: extract"). Git ignores the `assets/`
 folder, so the game never ends up in the repository.
 
-Each [edition](glossary.md#edition) of the game has a different `default.xex` and needs its own build. The main
-folder, `app/`, is set up for the PAL Spanish edition; [editions.md](editions.md) explains the others.
+Call of Duty 2 for Xbox 360 is a single worldwide release (Title ID `415607D1`); the disc also carries a second
+program, `default_mp.xex`, for multiplayer (Title ID `415607DA`), which is a different one and would need its own
+build. The main folder, `app/`, points at `assets/game_root/default.xex` — the single-player program. The
+[editions](editions.md) machinery came with the fork and is still set up for the many regional editions of Need for
+Speed: Most Wanted; it has not been adapted yet.
 
 ## 3. Build the graphics driver
 
 **Why:** the NRO carries its own Vulkan driver, [NVK](glossary.md#nvk), with this port's changes.
 
 Follow [mesa/README.md](../mesa/README.md): build [mesa-switch](https://github.com/danfromtico/mesa-switch) at commit
-`1a8c1a66d6f` with `mesa/mesa-switch-nfsmw.patch` applied. The result is an SDK folder. The app needs its subfolder
+`1a8c1a66d6f` with `mesa/mesa-switch-cod2.patch` applied. That page also lists what has to be installed first — the
+MSYS2 **CLANG64** host tools, a native gcc and a Rust toolchain with the `aarch64-unknown-linux-gnu` target. None of
+them come with devkitPro. The result is an SDK folder. The app needs its subfolder
 `opt/devkitpro/portlibs/switch`, which contains `lib/libvulkan.a`.
 
 ## 4. Build the code generator
@@ -75,18 +88,22 @@ cmake -S sdk -B out/host -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=
 cmake --build out/host --target rexglue
 ```
 
+`out/host` is only where CMake keeps its build records. The program itself is written next to the SDK's other
+output, in `sdk/out/win-amd64/rexglue.exe` (the SDK puts its binaries under `out/<platform>`). That is the path the
+next step needs.
+
 This version has a change that makes the translated code faster: the Xbox 360 processor's registers live in normal C++
 variables, shared by the pieces of a split function (`share_registers`, see [toolchain.md](toolchain.md)).
 
 ## 5. Translate the game to C++
 
 ```sh
-REXGLUE=out/host/rexglue tools/codegen.sh app
+REXGLUE=sdk/out/win-amd64/rexglue.exe tools/codegen.sh app
 ```
 
 This does three things:
 
-1. It runs the code generator with the settings in `app/nfsmw_manifest.toml`. The C++ goes to `app/generated/default`,
+1. It runs the code generator with the settings in `app/cod2_manifest.toml`. The C++ goes to `app/generated/default`,
    which git ignores because it is made from the game.
 2. It runs `tools/llamadas_directas.py` ("direct calls"). It turns calls between translated functions into direct C++
    calls, so that LTO can optimize across files.
@@ -106,83 +123,89 @@ Or by hand:
 
 ```sh
 cmake -S app -B app/out/sw8 -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_TOOLCHAIN_FILE=tools/switch/cmake/switch-devkitA64.cmake \
+  -DCMAKE_TOOLCHAIN_FILE=$PWD/tools/switch/cmake/switch-devkitA64.cmake \
   -DREXSDK_DIR=$PWD/sdk \
   -DREXGLUE_SWITCH_NVK_SDK=/path/to/mesa-sdk/opt/devkitpro/portlibs/switch \
-  -DNFSMW_PGO=usar -DNFSMW_BUILD_LAUNCHER=OFF
+  -DCOD2_PGO= -DCOD2_BUILD_LAUNCHER=OFF
 cmake --build app/out/sw8 -j 4
 ```
 
-The result is `app/out/sw8/nfsmw.nro`. Rename it to `nfsmw-nx.nro` when you copy it to the SD card (step 8).
+The toolchain file path has to be absolute: CMake reads a relative `CMAKE_TOOLCHAIN_FILE` from the build folder, not
+from where you run the command. On Windows use `$PWD` from Git Bash, or the full path from PowerShell.
+
+The result is `app/out/sw8/cod2.nro`. Rename it to `cod2-nx.nro` when you copy it to the SD card (step 8).
 
 Build options, in `app/CMakeLists.txt`:
 
 | Option | Normally | What it does |
 |---|---|---|
-| `NFSMW_LTO` | ON | Optimizes the translated code and the app as a whole at the end of the build ([LTO](glossary.md#lto)). It uses 2 jobs (`-flto=2`), because more do not fit in 16 GB of RAM. |
-| `NFSMW_PGO` | empty | `usar` ("use") builds with the recorded profile in `pgo/pal_es`. `generar` ("generate") builds a special NRO that records a new profile. |
-| `NFSMW_ORDEN_FUNCIONES` | ON | Puts the functions that run most at the start of the program (list in `app/orden_funciones.ld`), which makes them faster to fetch. |
+| `COD2_LTO` | ON | Optimizes the translated code and the app as a whole at the end of the build ([LTO](glossary.md#lto)). It uses 2 jobs (`-flto=2`), because more do not fit in 16 GB of RAM. |
+| `COD2_PGO` | empty | `usar` ("use") builds with the recorded profile in `pgo/<edition>`. `generar` ("generate") builds a special NRO that records a new profile. **There is no profile for this game yet**, so leave it empty (see below). |
+| `COD2_ORDEN_FUNCIONES` | ON | Puts the functions that run most at the start of the program (list in `app/orden_funciones.ld`), which makes them faster to fetch. |
 
-The icon for the Homebrew Menu is not included. Put a 256x256 JPEG at `tools/switch/icono/nfsmw_icono.jpg`, or the
+The icon for the Homebrew Menu is not included. Put a 256x256 JPEG at `tools/switch/icono/cod2_icono.jpg`, or the
 NRO gets libnx's default icon.
 
 ### The PGO profile
 
-[PGO](glossary.md#pgo) uses a record of which code runs most. `pgo/<edition>/` has the profile the released NROs were
-built with. It was recorded on the console while playing (a small test, not a full playthrough), and then translated to
-each edition with `tools/editions/pgo/traducir_perfil.py`.
+[PGO](glossary.md#pgo) uses a record of which code runs most. **`pgo/` is empty on purpose.** The profiles that came
+with the fork were deleted: a GCC profile matches each function by a fingerprint of its name, and every recompiled
+function is named after its guest address, so a profile recorded for one game is worthless for another.
+
+To record one:
+
+1. Configure with `-DCOD2_PGO=generar` and build.
+2. Play. The NRO writes its counters to `sdmc:/switch/cod2-nx/pgo/` every three minutes.
+3. Copy the `.gcda` files into `pgo/<edition>/`.
+4. Build again with `-DCOD2_PGO=usar`.
 
 **Why the folder paths matter:** GCC finds each function in the profile by a fingerprint of its name. For functions
-that only exist inside one file (`static` functions, or those in anonymous namespaces), the fingerprint also includes
+that only exist inside one file (`static` functions, or those in an anonymous namespace), the fingerprint also includes
 the path of that file. So those functions only match if you build from the same folder paths the profile was recorded
 with. Otherwise GCC builds them without the profile: a small loss, not an error.
-
-To record a new profile:
-
-1. Configure with `-DNFSMW_PGO=generar` and build.
-2. Play. The NRO writes its counters to `sdmc:/switch/nfsmw/pgo/` every three minutes.
-3. Copy the `.gcda` files into `pgo/pal_es/`.
-4. Build again with `-DNFSMW_PGO=usar`.
 
 [toolchain.md](toolchain.md) has the details and the traps.
 
 ## 7. Build the shader library
 
 The game's [shaders](glossary.md#shader) are Xbox 360 [microcode](glossary.md#microcode) inside the disc files.
-`nfsmw_shaders.nfsp` has them translated to [SPIR-V](glossary.md#spir-v) (see [shaders.md](shaders.md)). The
+`cod2_shaders.nfsp` has them translated to [SPIR-V](glossary.md#spir-v) (see [shaders.md](shaders.md)). The
 installer page builds it in the browser from the disc; you only need this step to build it on your PC.
 
 ```sh
-MESA=/path/to/mesa-switch shaders/nfsmw_regenerar_biblioteca_pcf.sh out/library /path/to/extracted/containers
+shaders/cod2_regenerar_biblioteca_pcf.sh out/library /path/to/extracted/containers
 ```
 
 The containers (the files that hold the shaders) are taken out of the disc files by
-`shaders/nfsmw_buscar_contenedores.cpp` ("find containers").
+`shaders/cod2_buscar_contenedores.cpp` ("find containers"). For Call of Duty 2 they are inside the `.ff` [fastfiles](glossary.md#fastfile),
+which are zlib streams and have to be inflated first.
 
 ## 8. Copy it to the SD card
 
 The NRO expects this layout, the same one the installer page makes:
 
 ```
-sdmc:/switch/nfsmw-nx/
-    nfsmw-nx.nro
-    nfsmw.toml
-    nfsmw_shaders.nfsp
+sdmc:/switch/cod2-nx/
+    cod2-nx.nro
+    cod2.toml
+    cod2_shaders.nfsp
     game_root/          the files of the disc
 ```
 
-`nfsmw.toml` has the settings read at startup ([cvars](glossary.md#cvar)). The one the installer page gives players is
-`release/nfsmw.toml` in the [installer's repository](https://github.com/StevensND/nfsmw-nx-installer).
+`cod2.toml` has the settings read at startup ([cvars](glossary.md#cvar)). The one the installer page gives players is
+`release/cod2.toml` in the [installer's repository](https://github.com/fenndooscar/cod2-nx-installer).
 
 Start the NRO from the Homebrew Menu in [title takeover](glossary.md#title-takeover) mode (hold R while you start a
 game), or with a [forwarder](glossary.md#forwarder). Started from the album, it does not get enough memory.
 
 ## Other editions
 
-Every `default.xex` is a different program, so every edition needs its own build:
+**Not adapted to Call of Duty 2 yet.** The tools are here and work, but every file under `tools/editions/*/` holds
+Need for Speed: Most Wanted addresses, and there is no `pgo/<edition>` to match. The one case this game has is
+`default_mp.xex` (multiplayer), which is a different program and would need its own tree:
 
 - `tools/editions/crear_arbol.py` ("create tree") makes a copy of the app, `app_<edition>`, with all of our addresses
   translated to that edition.
 - `tools/editions/build_edition.ps1` builds it from the same folder paths as the main one, so the PGO profile matches.
 
-[editions.md](editions.md) explains it step by step.
+[editions.md](editions.md) explains the machinery as it was used for the other game.

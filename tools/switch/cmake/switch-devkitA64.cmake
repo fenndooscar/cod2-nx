@@ -24,10 +24,15 @@ set(REXGLUE_USE_VULKAN ON CACHE BOOL "NVK" FORCE)
 set(REXGLUE_USE_D3D12 OFF CACHE BOOL "No D3D12 on Switch" FORCE)
 
 if(NOT DEFINED DEVKITPRO)
-    if(DEFINED ENV{DEVKITPRO})
+    # The devkitPro installer leaves DEVKITPRO=/opt/devkitpro in the machine environment, which is the path the MSYS2
+    # shell uses and does not exist for a native Windows program. Prefer the environment variable only when it points
+    # somewhere real, and fall back to the usual install location.
+    if(DEFINED ENV{DEVKITPRO} AND EXISTS "$ENV{DEVKITPRO}/libnx/switch.specs")
         set(DEVKITPRO "$ENV{DEVKITPRO}" CACHE PATH "devkitPro root")
-    elseif(CMAKE_HOST_WIN32 AND EXISTS "C:/devkitPro")
+    elseif(CMAKE_HOST_WIN32 AND EXISTS "C:/devkitPro/libnx/switch.specs")
         set(DEVKITPRO "C:/devkitPro" CACHE PATH "devkitPro root")
+    elseif(DEFINED ENV{DEVKITPRO})
+        set(DEVKITPRO "$ENV{DEVKITPRO}" CACHE PATH "devkitPro root")
     else()
         set(DEVKITPRO "/opt/devkitpro" CACHE PATH "devkitPro root")
     endif()

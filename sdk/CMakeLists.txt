@@ -198,6 +198,15 @@ else()
     message(FATAL_ERROR "Unsupported platform. ReXGlue supports Windows, Linux, and macOS only.")
 endif()
 
+# x86-64 code uses SSSE3/SSE4.1 intrinsics (rex::memory's byte swaps, among others), which clang does not enable
+# by default for a generic x86-64 target: it stops at the always_inline check with "requires target feature
+# 'ssse3'". rexglue_apply_target_settings() adds -msse4.1, but it only runs for host app targets, and the SDK's
+# own libraries (rexcore and friends) are OBJECT libraries that never receive it. Set it globally instead.
+# MSVC accepts these intrinsics without an /arch flag, which is why this only shows with clang.
+if(NOT MSVC AND REX_TARGET_PROCESSOR MATCHES "AMD64|x86_64")
+    add_compile_options(-msse4.1)
+endif()
+
 # Build config as compile definition (multi-config generators don't know config at configure time)
 add_compile_definitions(REXGLUE_BUILD_CONFIG="$<CONFIG>")
 

@@ -131,7 +131,7 @@ Unofficial software for the Switch. It needs a console with custom firmware (Atm
 
 ### NRO
 
-The file format of Switch homebrew programs. The port is `nfsmw-nx.nro`. Inside it are the program, its icon, and its
+The file format of Switch homebrew programs. The port is `cod2-nx.nro`. Inside it are the program, its icon, and its
 name and version (the "NACP").
 
 ### Title takeover
@@ -195,7 +195,7 @@ The shader format that [Vulkan](#vulkan) accepts.
 
 ### Shader library
 
-The file `nfsmw_shaders.nfsp`, with all of the game's shaders already translated to [SPIR-V](#spir-v). The installer
+The file `cod2_shaders.nfsp`, with all of the game's shaders already translated to [SPIR-V](#spir-v). The installer
 page makes it from the user's own disc, because the shaders are part of the game and cannot be shared.
 
 ### Render target
@@ -212,7 +212,7 @@ If that happens while playing, it causes a stutter.
 ### Pipeline cache
 
 A file where the compiled [pipelines](#pipeline) are saved, so they are not compiled again next time:
-`cache/nfsmw_nativo_pipelines.bin` in the port's folder. That is why the first race after installing can stutter,
+`cache/cod2_nativo_pipelines.bin` in the port's folder. That is why the first race after installing can stutter,
 and later ones do not.
 
 ### ZCULL
@@ -255,10 +255,10 @@ memory (its cache) more easily. The list is `app/orden_funciones.ld`.
 ### cvar
 
 A setting of the program ("console variable"). Each one has a name, a default value written in the code and a
-description. You can change it in [nfsmw.toml](#nfsmwtoml) or in the [Debug Menu](#debug-menu). This port's own
-settings start with `nfsmw_` and have Spanish names.
+description. You can change it in [cod2.toml](#cod2toml) or in the [Debug Menu](#debug-menu). This port's own
+settings start with `cod2_` and have Spanish names.
 
-### nfsmw.toml
+### cod2.toml
 
 The settings file next to the NRO. Each line sets one [cvar](#cvar): `name = value`. If you delete a line, that
 setting goes back to its default value from the code.

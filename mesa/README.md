@@ -6,8 +6,43 @@
   open source Vulkan driver for NVIDIA GPUs, which is part of the **Mesa** project.
 - It comes from [danfromtico/mesa-switch](https://github.com/danfromtico/mesa-switch), a version of Mesa 26.2.1 that
   runs on the Switch's operating system (called Horizon).
-- This port adds its own changes on top. They are all in one file of this folder: `mesa-switch-nfsmw.patch`.
+- This port adds its own changes on top. They are all in one file of this folder: `mesa-switch-cod2.patch`.
 - Building Mesa gives a library, `libvulkan.a`, and the NRO includes it.
+
+## What you have to install first
+
+`build-unified.sh` refuses to start unless `MSYSTEM` is set (it has to be run from an MSYS2 shell, not from Git Bash or
+PowerShell), and it runs `meson`, `ninja`, `python`, `sed` and `git` **by name**. On top of that, the cross files it
+passes to Meson name the compilers and tools by absolute path, so they have to exist exactly there.
+
+From `switch_cross_file_msys2.txt`, `switch_native_tools_msys2.txt` and `windows_x64_host_cross_file_msys2.txt` in the
+mesa-switch tree:
+
+| Path | What it is |
+|---|---|
+| `C:/msys64/clang64/bin/clang.exe`, `clang++.exe`, `llvm-ar.exe`, `llvm-strip.exe`, `llvm-nm.exe`, `llvm-config.exe`, `pkg-config.exe`, `cmake.exe` | The **host** compiler that builds Mesa's own build tools (the shader compiler `mesa_clc` and `vtn_bindgen2`). These are the CLANG64 environment's, not MINGW64's. |
+| `C:/msys64/clangarm64/bin/cbindgen.exe` | Generates the Rust bindings. **Check this one on your machine**: it points at the CLANGARM64 environment, which is the one for Windows on ARM, while everything else in the same file is x86-64. If you are on x86-64 you may have to point it at your own `cbindgen`. |
+| `C:/msys64/usr/bin/bash.exe` | Runs the wrapper scripts |
+| `C:/msys64/ucrt64/bin/gcc.exe` or `C:/msys64/mingw64/bin/gcc.exe` or `C:/msys64/clang64/bin/gcc.exe` | A native compiler, only to link the small programs Meson uses to probe the Rust compiler. This port's patch tries all three; the original only tried the first. |
+| a Rust toolchain with the **`aarch64-unknown-linux-gnu`** target | NVK's shader compiler (NAK) is Rust, and it is cross-compiled for the Switch. A plain `rustup` install does **not** include that target: `rustup target add aarch64-unknown-linux-gnu`. `build-unified.sh` also accepts a cached toolchain in `build/deps/{cargo,rustup}`, or `MESA_SWITCH_RUSTC`. |
+
+In the MSYS2 **CLANG64** shell, the host tools come from one group:
+
+```sh
+pacman -S --needed mingw-w64-clang-x86_64-toolchain \
+  mingw-w64-clang-x86_64-llvm mingw-w64-clang-x86_64-meson \
+  mingw-w64-clang-x86_64-pkgconf mingw-w64-clang-x86_64-ninja \
+  mingw-w64-clang-x86_64-python git
+```
+
+The `llvm` package matters for a second reason: this port's patch adds `-Dshared-llvm=enabled` to the host build, so it
+links against MSYS2's shared LLVM instead of building LLVM from source (which takes hours and does not fit in 16 GB).
+That is also why the patch adds `'demangle'` to the LLVM modules list — with a shared LLVM, `llvm::demangle` lives in
+its own module and the link fails without it.
+
+`pacman` and this package list were **not** run on the machine this fork was prepared on (its MSYS2 has only the base
+packages). Treat the list as the starting point and let `meson setup` tell you what is still missing: it names every
+program and library it cannot find.
 
 ## Getting the same driver as the released NROs
 
@@ -23,7 +58,7 @@
    (35 changed files):
 
    ```sh
-   git apply ../nfsmw-nx/mesa/mesa-switch-nfsmw.patch
+   git apply ../cod2-nx/mesa/mesa-switch-cod2.patch
    ```
 
 3. Build it. The first time, use mesa-switch's own script, `build-unified.sh` (its README explains how). Later
@@ -77,12 +112,12 @@ You will not find it written in the patch or in any header, because Mesa's build
 There are two ways:
 
 - **The port's own settings.** ZCULL, the faster draws and the set 4 by differences are requested by the port, with
-  settings in `nfsmw.toml` (also in the Debug Menu), all on: `nfsmw_nativo_zcull`, `nfsmw_nativo_set4_diferencias`
-  and, for the faster draws, `nfsmw_nativo_nvk_emision`, `nfsmw_nativo_nvk_cbufs`, `nfsmw_nativo_nvk_dinamico` and
-  `nfsmw_nativo_nvk_precarga`. The faster draws and the set 4 by differences also check themselves: on some draws they
+  settings in `cod2.toml` (also in the Debug Menu), all on: `cod2_nativo_zcull`, `cod2_nativo_set4_diferencias`
+  and, for the faster draws, `cod2_nativo_nvk_emision`, `cod2_nativo_nvk_cbufs`, `cod2_nativo_nvk_dinamico` and
+  `cod2_nativo_nvk_precarga`. The faster draws and the set 4 by differences also check themselves: on some draws they
   compare their result with the normal way, and if they ever see a difference, they turn off.
-- **Environment variables for the driver.** You do not set them in Windows: write them in `nfsmw.toml`, in the setting
-  `nfsmw_mesa_entorno`, separated by `;`, for example `nfsmw_mesa_entorno = "NVK_COPY_ENGINE=1;NVK_SHADER_STATS=1"`.
+- **Environment variables for the driver.** You do not set them in Windows: write them in `cod2.toml`, in the setting
+  `cod2_mesa_entorno`, separated by `;`, for example `cod2_mesa_entorno = "NVK_COPY_ENGINE=1;NVK_SHADER_STATS=1"`.
   Empty, as released, means the driver's normal behavior.
 
 | Variable | Normally | What it does |
@@ -99,7 +134,7 @@ There are two ways:
 1. Rebuild and install it with `build_mesa_msys2.sh`, from an MSYS2 MINGW64 window.
 2. Copy `libvulkan.a` (the shader compiler, NAK, is inside it), `libnvk.a` and `libnak_rs.a` to the SDK folder the app
    uses.
-3. Delete `app/out/sw8/nfsmw` and `app/out/sw8/nfsmw.nro` before building the app. Otherwise the build does not notice
+3. Delete `app/out/sw8/cod2` and `app/out/sw8/cod2.nro` before building the app. Otherwise the build does not notice
    that the driver changed, and the NRO keeps the old one.
 4. If you changed the shader compiler (NAK), raise the revision number in `nvk_shader.c`. On the Switch that number is
    what tells old compiled shaders from new ones: without it, the game would keep using shaders compiled with the old

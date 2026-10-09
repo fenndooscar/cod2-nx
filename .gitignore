@@ -16,7 +16,7 @@ assets/
 generated/
 app*/generated/
 app*/src/copias_literales/
-app*/src/nfsmw_nativo_resplandor_*_spirv.h
+app*/src/cod2_nativo_resplandor_*_spirv.h
 app_*/
 
 # --- Build output -------------------------------------------------------------
@@ -31,6 +31,25 @@ build/
 *.log
 *.err
 shaders/wasm/out/
+
+# --- Third-party sources ------------------------------------------------------
+# Only the files this port changes are committed (see THIRD_PARTY_NOTICES.md). The rest comes from the ReXGlue
+# release through tools/fetch_thirdparty.py, which is step 1 of docs/building.md. Without these rules that step
+# leaves about 19,000 vendored files in `git status`.
+sdk/thirdparty/*
+!sdk/thirdparty/CMakeLists.txt
+!sdk/thirdparty/FFmpeg/
+sdk/thirdparty/FFmpeg/*
+!sdk/thirdparty/FFmpeg/config.h
+!sdk/thirdparty/FFmpeg/config_cod2_wmv3.h
+!sdk/thirdparty/FFmpeg/config_switch_aarch64.h
+!sdk/thirdparty/FFmpeg/libavcodec/
+sdk/thirdparty/FFmpeg/libavcodec/*
+!sdk/thirdparty/FFmpeg/libavcodec/fft_template.c
+!sdk/thirdparty/FFmpeg/libavcodec/mdct_template.c
+!sdk/thirdparty/ffmpeg-overlay/
+sdk/thirdparty/ffmpeg-overlay/*
+!sdk/thirdparty/ffmpeg-overlay/codec_list.c
 
 # --- Tools --------------------------------------------------------------------
 __pycache__/

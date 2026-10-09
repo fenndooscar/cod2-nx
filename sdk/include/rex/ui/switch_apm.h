@@ -1,4 +1,4 @@
-/* nfsmw - console performance profile (apm). See switch_apm.cpp. */
+/* cod2 - console performance profile (apm). See switch_apm.cpp. */
 #pragma once
 
 #include "rex/platform.h"

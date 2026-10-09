@@ -25,7 +25,7 @@
 
 namespace rex::ui {
 
-// nfsmw: cvars the app removes from the menu (OcultarAjustesEnMenu).
+// cod2: cvars the app removes from the menu (OcultarAjustesEnMenu).
 namespace {
 std::mutex& MutexAjustesOcultos() {
   static std::mutex mutex;
@@ -176,7 +176,7 @@ static rex::ui::VirtualKey ImGuiKeyToVirtualKey(ImGuiKey key) {
 
 void SettingsDialog::OnDraw(ImGuiIO& /*io*/) {
   auto& registry = rex::cvar::GetRegistry();
-  // nfsmw: hidden cvars are not listed, and a category with nothing visible does not show either.
+  // cod2: hidden cvars are not listed, and a category with nothing visible does not show either.
   std::set<std::string> ocultos;
   {
     std::lock_guard<std::mutex> cerrojo(MutexAjustesOcultos());
@@ -324,7 +324,7 @@ void SettingsDialog::OnDraw(ImGuiIO& /*io*/) {
   ImGui::BeginChild("##cvars", ImVec2(0, -30.0f), false);
   for (auto& entry : registry) {
     if (ocultos.count(entry.name)) {
-      continue;  // nfsmw: OcultarAjustesEnMenu
+      continue;  // cod2: OcultarAjustesEnMenu
     }
     // Filter by category (unless searching).
     if (!searching) {

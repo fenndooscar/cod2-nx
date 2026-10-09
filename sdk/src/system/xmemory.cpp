@@ -910,7 +910,7 @@ rex::memory::PageAccess ToPageAccess(uint32_t protect) {
 // given on the host as read-write. On Horizon there are no read-only pages in
 // the guest window: they are unmapped, and every read goes through the
 // exception handler (2 us per access). The XEX constants live in such pages,
-// and the game code reads them constantly. On the first boot of NFSMW one of
+// and the game code reads them constantly. On the first boot of COD2 one of
 // those emulated reads was also what exposed the resume bug (see
 // resume_ctx.h). The game does not write to those pages (it would fault on the
 // 360 and on the PC), so dropping the protection does not change its behavior.

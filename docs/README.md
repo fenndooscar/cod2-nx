@@ -1,5 +1,13 @@
 # Documentation
 
+> [!IMPORTANT]
+> These documents came with the fork and describe the port they were written for, **Need for Speed: Most Wanted**.
+> The machinery they explain — the toolchain, the Switch layer, the native renderer, the shader pipeline, the Mesa
+> driver, the build options — is the same machinery this port uses, so they are worth reading in full. But every
+> address, every hook, every measured number and every edition list in them belongs to that other game. Read them as
+> a guide to how the port works, not as a description of Call of Duty 2. See the [README](../README.md) for the state
+> of this port.
+
 ## Start here
 
 These documents explain how the port works, how to build it, and how to use it as a guide to port another Xbox 360

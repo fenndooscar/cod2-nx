@@ -53,7 +53,44 @@ def main():
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 shutil.copy2(src, dst)
                 copied += 1
-        print(f'{copied} files copied into sdk/thirdparty, {kept} files of this port kept')
+
+        # sdk/thirdparty/CMakeLists.txt refuses to configure unless every vendored library has a .git entry, the
+        # way a real submodule checkout does. We copy the files without their history, so leave an empty marker in
+        # each folder that was a submodule upstream. Without it, step 1 of docs/building.md breaks the build.
+        markers = 0
+        for name in os.listdir(source):
+            if not os.path.exists(os.path.join(source, name, '.git')):
+                continue
+            marker = os.path.join(target, name, '.git')
+            if not os.path.exists(marker):
+                os.makedirs(marker, exist_ok=True)
+                markers += 1
+
+        # Git on Windows checks out symbolic links as small text files holding the path they point at
+        # (libmspack/cabextract/mspack/* are links to ../libmspack/mspack/*). A C compiler then reads the path as
+        # source code and fails, so replace every such file with a real copy of what it points at.
+        links = 0
+        for dirpath, dirnames, filenames in os.walk(target):
+            dirnames[:] = [d for d in dirnames if d != '.git']
+            for name in filenames:
+                path = os.path.join(dirpath, name)
+                try:
+                    if not (0 < os.path.getsize(path) < 200):
+                        continue
+                    with open(path, 'r', encoding='utf-8', errors='strict') as f:
+                        content = f.read()
+                except (OSError, UnicodeDecodeError):
+                    continue
+                if '\n' in content or not content.startswith(('../', './')):
+                    continue
+                pointed = os.path.normpath(os.path.join(dirpath, content))
+                if not os.path.isfile(pointed):
+                    continue
+                shutil.copyfile(pointed, path)
+                links += 1
+
+        print(f'{copied} files copied into sdk/thirdparty, {kept} files of this port kept, '
+              f'{markers} submodule markers written, {links} links materialised')
     finally:
         if sys.version_info >= (3, 12):
             shutil.rmtree(work, onexc=remove_readonly)

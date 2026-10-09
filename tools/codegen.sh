@@ -1,8 +1,11 @@
 #!/bin/bash
 # Runs the code generator on one edition tree and the two steps the build depends on.
 #
-#   REXGLUE=out/host/rexglue tools/codegen.sh app
-#   REXGLUE=out/host/rexglue tools/codegen.sh app_usa app_usa/enganchadas.txt app_usa/tabla.tsv
+#   REXGLUE=sdk/out/win-amd64/rexglue.exe tools/codegen.sh app
+#   REXGLUE=sdk/out/win-amd64/rexglue.exe tools/codegen.sh app_usa app_usa/enganchadas.txt app_usa/tabla.tsv
+#
+# The code generator is written into sdk/out/<platform>/, not into the CMake build folder out/host
+# (see docs/building.md, step 4).
 #
 # The second and third arguments are for the trees made by tools/editions/crear_arbol.py: the list of hooked
 # functions of that edition and the address table used to create it (see docs/editions.md).
@@ -14,7 +17,7 @@ REXGLUE=${REXGLUE:?set REXGLUE to the rexglue executable built from sdk/}
 PY=${PYTHON:-python}
 cd "$APP"
 echo "== codegen ($APP)"
-"$REXGLUE" codegen nfsmw_manifest.toml > codegen.log 2>&1 || { echo "codegen failed, see $APP/codegen.log"; exit 1; }
+"$REXGLUE" codegen cod2_manifest.toml > codegen.log 2>&1 || { echo "codegen failed, see $APP/codegen.log"; exit 1; }
 cd "$RAIZ"
 echo "== direct calls"
 if [ -n "${2:-}" ]; then

@@ -293,7 +293,7 @@ av_cold int ff_fft_init(FFTContext *s, int nbits, int inverse)
 } while(0);
 
     /*
-     * NFSMW: the permutation table only depends on (nbits, inverse,
+     * COD2: the permutation table only depends on (nbits, inverse,
      * fft_permutation) and comes out identical every time. The XMA decoder
      * reopens the codec on every new sound (XmaContext::ResetDecoderState), and
      * in a collision there are many at once: on the console, MDCT initialization
@@ -302,16 +302,16 @@ av_cold int ff_fft_init(FFTContext *s, int nbits, int inverse)
      * same values, same audio.
      */
     if (s->revtab) {
-        static AVMutex nfsmw_revtab_lock = AV_MUTEX_INITIALIZER;
-        static struct { int nbits, inverse, perm; uint16_t *tab; } nfsmw_revtab_cache[16];
-        static int nfsmw_revtab_n = 0;
+        static AVMutex cod2_revtab_lock = AV_MUTEX_INITIALIZER;
+        static struct { int nbits, inverse, perm; uint16_t *tab; } cod2_revtab_cache[16];
+        static int cod2_revtab_n = 0;
         uint16_t *cached = NULL;
-        ff_mutex_lock(&nfsmw_revtab_lock);
-        for (i = 0; i < nfsmw_revtab_n; i++) {
-            if (nfsmw_revtab_cache[i].nbits == nbits &&
-                nfsmw_revtab_cache[i].inverse == s->inverse &&
-                nfsmw_revtab_cache[i].perm == s->fft_permutation) {
-                cached = nfsmw_revtab_cache[i].tab;
+        ff_mutex_lock(&cod2_revtab_lock);
+        for (i = 0; i < cod2_revtab_n; i++) {
+            if (cod2_revtab_cache[i].nbits == nbits &&
+                cod2_revtab_cache[i].inverse == s->inverse &&
+                cod2_revtab_cache[i].perm == s->fft_permutation) {
+                cached = cod2_revtab_cache[i].tab;
                 break;
             }
         }
@@ -319,19 +319,19 @@ av_cold int ff_fft_init(FFTContext *s, int nbits, int inverse)
             memcpy(s->revtab, cached, n * sizeof(uint16_t));
         } else {
             SPLIT_RADIX_PERMUTATION()
-            if (nfsmw_revtab_n < 16) {
+            if (cod2_revtab_n < 16) {
                 uint16_t *copy = malloc(n * sizeof(uint16_t));
                 if (copy) {
                     memcpy(copy, s->revtab, n * sizeof(uint16_t));
-                    nfsmw_revtab_cache[nfsmw_revtab_n].nbits = nbits;
-                    nfsmw_revtab_cache[nfsmw_revtab_n].inverse = s->inverse;
-                    nfsmw_revtab_cache[nfsmw_revtab_n].perm = s->fft_permutation;
-                    nfsmw_revtab_cache[nfsmw_revtab_n].tab = copy;
-                    nfsmw_revtab_n++;
+                    cod2_revtab_cache[cod2_revtab_n].nbits = nbits;
+                    cod2_revtab_cache[cod2_revtab_n].inverse = s->inverse;
+                    cod2_revtab_cache[cod2_revtab_n].perm = s->fft_permutation;
+                    cod2_revtab_cache[cod2_revtab_n].tab = copy;
+                    cod2_revtab_n++;
                 }
             }
         }
-        ff_mutex_unlock(&nfsmw_revtab_lock);
+        ff_mutex_unlock(&cod2_revtab_lock);
     }
     if (s->revtab32)
         SPLIT_RADIX_PERMUTATION(32)

@@ -24,7 +24,7 @@
 #include "libavutil/common.h"
 #include "libavutil/libm.h"
 #include "libavutil/mathematics.h"
-#include "libavutil/thread.h"  /* NFSMW: cache de tablas */
+#include "libavutil/thread.h"  /* COD2: cache de tablas */
 #include "fft.h"
 #include "fft-internal.h"
 
@@ -91,7 +91,7 @@ av_cold int ff_mdct_init(FFTContext *s, int nbits, int inverse, double scale)
     }
 
     /*
-     * NFSMW: the tcos/tsin table only depends on (nbits, scale,
+     * COD2: the tcos/tsin table only depends on (nbits, scale,
      * mdct_permutation) and comes out identical every time, but it costs n/4
      * sines and cosines. The XMA decoder reopens the codec on every new sound;
      * in a collision there are many at once. It is computed once per
@@ -99,26 +99,26 @@ av_cold int ff_mdct_init(FFTContext *s, int nbits, int inverse, double scale)
      * See fft_template.c.
      */
     {
-        static AVMutex nfsmw_tcos_lock = AV_MUTEX_INITIALIZER;
-        static struct { int nbits, perm; double scale; FFTSample *tab; } nfsmw_tcos_cache[16];
-        static int nfsmw_tcos_n = 0;
+        static AVMutex cod2_tcos_lock = AV_MUTEX_INITIALIZER;
+        static struct { int nbits, perm; double scale; FFTSample *tab; } cod2_tcos_cache[16];
+        static int cod2_tcos_n = 0;
         const double clave_scale = scale;
         FFTSample *cached = NULL;
-        ff_mutex_lock(&nfsmw_tcos_lock);
-        for (i = 0; i < nfsmw_tcos_n; i++) {
-            if (nfsmw_tcos_cache[i].nbits == nbits &&
-                nfsmw_tcos_cache[i].perm == s->mdct_permutation &&
-                nfsmw_tcos_cache[i].scale == clave_scale) {
-                cached = nfsmw_tcos_cache[i].tab;
+        ff_mutex_lock(&cod2_tcos_lock);
+        for (i = 0; i < cod2_tcos_n; i++) {
+            if (cod2_tcos_cache[i].nbits == nbits &&
+                cod2_tcos_cache[i].perm == s->mdct_permutation &&
+                cod2_tcos_cache[i].scale == clave_scale) {
+                cached = cod2_tcos_cache[i].tab;
                 break;
             }
         }
         if (cached) {
             memcpy(s->tcos, cached, (n / 2) * sizeof(FFTSample));
-            ff_mutex_unlock(&nfsmw_tcos_lock);
+            ff_mutex_unlock(&cod2_tcos_lock);
             return 0;
         }
-        ff_mutex_unlock(&nfsmw_tcos_lock);
+        ff_mutex_unlock(&cod2_tcos_lock);
         theta = 1.0 / 8.0 + (scale < 0 ? n4 : 0);
         scale = sqrt(fabs(scale));
         for(i=0;i<n4;i++) {
@@ -131,19 +131,19 @@ av_cold int ff_mdct_init(FFTContext *s, int nbits, int inverse, double scale)
             s->tsin[i*tstep] = FIX15(-sin(alpha) * scale);
 #endif
         }
-        ff_mutex_lock(&nfsmw_tcos_lock);
-        if (nfsmw_tcos_n < 16) {
+        ff_mutex_lock(&cod2_tcos_lock);
+        if (cod2_tcos_n < 16) {
             FFTSample *copy = malloc((n / 2) * sizeof(FFTSample));
             if (copy) {
                 memcpy(copy, s->tcos, (n / 2) * sizeof(FFTSample));
-                nfsmw_tcos_cache[nfsmw_tcos_n].nbits = nbits;
-                nfsmw_tcos_cache[nfsmw_tcos_n].perm = s->mdct_permutation;
-                nfsmw_tcos_cache[nfsmw_tcos_n].scale = clave_scale;
-                nfsmw_tcos_cache[nfsmw_tcos_n].tab = copy;
-                nfsmw_tcos_n++;
+                cod2_tcos_cache[cod2_tcos_n].nbits = nbits;
+                cod2_tcos_cache[cod2_tcos_n].perm = s->mdct_permutation;
+                cod2_tcos_cache[cod2_tcos_n].scale = clave_scale;
+                cod2_tcos_cache[cod2_tcos_n].tab = copy;
+                cod2_tcos_n++;
             }
         }
-        ff_mutex_unlock(&nfsmw_tcos_lock);
+        ff_mutex_unlock(&cod2_tcos_lock);
         return 0;
     }
     theta = 1.0 / 8.0 + (scale < 0 ? n4 : 0);
