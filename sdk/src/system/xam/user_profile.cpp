@@ -10,9 +10,11 @@
  */
 
 #include <sstream>
+#include <system_error>
 
 #include <fmt/format.h>
 
+#include <rex/filesystem.h>
 #include <rex/logging.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xam/user_profile.h>
@@ -159,12 +161,24 @@ void UserProfile::SaveSetting(UserProfile::Setting* setting) {
   if (setting->is_title_specific()) {
     auto serialized_setting = setting->Serialize();
     auto content_dir = kernel_state_->content_manager()->ResolveGameUserContentPath();
-    std::filesystem::create_directories(content_dir);
+    // The throwing overload used to kill the whole process: when the profile folder cannot be created,
+    // std::filesystem_error escapes the guest call, nothing catches it, and the game dies with
+    // 0xC0000409 (stack: _Throw_fs_error -> SaveSetting, see app/src/cod2_pc_excepciones.cpp).
+    // A setting that cannot be written is not worth the session, so the failure is reported instead.
+    std::error_code ec;
+    std::filesystem::create_directories(content_dir, ec);
+    if (ec) {
+      REXSYS_ERROR("No se ha podido crear la carpeta de perfil «{}» para el ajuste {:08X}: {} ({})",
+                   rex::path_to_utf8(content_dir), setting->setting_id, ec.message(), ec.value());
+      return;
+    }
     auto setting_id = fmt::format("{:08X}", setting->setting_id);
     auto file_path = content_dir / setting_id;
     auto file = rex::filesystem::OpenFile(file_path, "wb");
-    fwrite(serialized_setting.data(), 1, serialized_setting.size(), file);
-    fclose(file);
+    if (file) {
+      fwrite(serialized_setting.data(), 1, serialized_setting.size(), file);
+      fclose(file);
+    }
   } else {
     // Unsupported for now.  Other settings aren't per-game and need to be
     // stored some other way.

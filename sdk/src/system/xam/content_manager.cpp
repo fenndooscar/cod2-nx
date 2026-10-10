@@ -541,7 +541,15 @@ X_RESULT ContentManager::SetContentThumbnail(uint64_t xuid, const XCONTENT_AGGRE
                                              std::vector<uint8_t> buffer) {
   auto global_lock = global_critical_region_.Acquire();
   auto package_path = ResolvePackagePath(xuid, data);
-  std::filesystem::create_directories(package_path);
+  // Same trap as UserProfile::SaveSetting: the throwing overload turns "the game asked for a thumbnail"
+  // into an unhandled std::filesystem_error and the process dies with 0xC0000409.
+  std::error_code ec;
+  std::filesystem::create_directories(package_path, ec);
+  if (ec) {
+    REXSYS_ERROR("[guardado] miniatura de «{}»: NO se ha podido crear {}: {} ({})", data.file_name(),
+                 rex::path_to_utf8(package_path), ec.message(), ec.value());
+    return X_ERROR_ACCESS_DENIED;
+  }
   if (std::filesystem::exists(package_path)) {
     auto thumb_path = package_path / kThumbnailFileName;
     auto file = rex::filesystem::OpenFile(thumb_path, "wb");
