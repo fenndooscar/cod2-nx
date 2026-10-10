@@ -1309,12 +1309,28 @@ BoundsInfo scanForBounds(DecodedBinary& decoded, uint32_t bctrAddr, const CodeRe
     using namespace rex::codegen::ppc;
 
     // Look for cmpli/cmpi followed by conditional branch
+    //
+    // A comparison against zero is not an upper bound, it is the null test of the guard before
+    // the dispatch (`if (flags) { if (more) goto default; } switch (index)`), and reading it as
+    // a bound gives a one-entry table. Observed in Call of Duty 2 at bctr 0x824337B4: the
+    // `cmpi cr6, r11, 0` of the guard -- on an r11 that the dispatch then overwrites -- produced
+    // `case 0` for a four-entry table, so every other index fell into the `__builtin_trap()` of
+    // the default case and the process died with STATUS_ILLEGAL_INSTRUCTION and no log line.
+    // Zero is skipped, and the scan stops there rather than looking further back, because past
+    // that guard is another basic block and the comparison it would find belongs to it. Without
+    // a bound the caller falls back to max_jump_table_entries and the target validation stops at
+    // the real end of the table, which is what this table needs.
     if (insn->opcode == Opcode::cmpli) {
       // cmpli crX, L, rA, UIMM
       REXCODEGEN_TRACE("scanForBounds: found cmpli at 0x{:08X} RA=r{} UIMM={} (expecting r{})",
                        scanAddr, static_cast<unsigned>(insn->D.RA), static_cast<int>(insn->D.d),
                        expectedReg);
       if (insn->D.RA == expectedReg) {
+        if (insn->D.d == 0) {
+          REXCODEGEN_TRACE("scanForBounds: 0x{:08X} compares r{} with zero, not a bound",
+                           scanAddr, expectedReg);
+          break;
+        }
         result.maxEntries = static_cast<uint32_t>(insn->D.d) + 1;
         result.indexReg = expectedReg;
         result.found = true;
@@ -1329,6 +1345,11 @@ BoundsInfo scanForBounds(DecodedBinary& decoded, uint32_t bctrAddr, const CodeRe
                        scanAddr, static_cast<unsigned>(insn->D.RA), static_cast<int>(insn->D.d),
                        expectedReg);
       if (insn->D.RA == expectedReg) {
+        if (insn->D.d == 0) {
+          REXCODEGEN_TRACE("scanForBounds: 0x{:08X} compares r{} with zero, not a bound",
+                           scanAddr, expectedReg);
+          break;
+        }
         result.maxEntries = static_cast<uint32_t>(insn->D.d) + 1;
         result.indexReg = expectedReg;
         result.found = true;

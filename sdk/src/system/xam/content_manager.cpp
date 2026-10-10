@@ -371,7 +371,15 @@ X_RESULT ContentManager::WriteContentHeaderFile(uint64_t xuid, XCONTENT_AGGREGAT
   auto parent_path = header_path.parent_path();
 
   if (!std::filesystem::exists(parent_path)) {
-    if (!std::filesystem::create_directories(parent_path)) {
+    // Non-throwing for the same reason as CreateContent: this runs inside the deferred-completion
+    // dispatcher, and an escaping filesystem_error there is fatal to the process. Observed as
+    // "[FATAL] Dispatch thread: deferred completion threw 'create_directories: Access is denied.'"
+    // naming the Headers path of a save.
+    std::error_code ec;
+    std::filesystem::create_directories(parent_path, ec);
+    if (ec) {
+      REXSYS_ERROR("[guardado] cabecera de «{}»: NO se ha podido crear {}: {} ({})", data.file_name(),
+                   rex::path_to_utf8(parent_path), ec.message(), ec.value());
       return X_ERROR_ACCESS_DENIED;
     }
   }
@@ -441,9 +449,15 @@ X_RESULT ContentManager::CreateContent(const std::string_view root_name, uint64_
     REXSYS_WARN("[guardado] crear «{}»: ya existia, se devuelve ALREADY_EXISTS", data.file_name());
     return X_ERROR_ALREADY_EXISTS;
   }
-  if (!std::filesystem::create_directories(package_path)) {
-    REXSYS_ERROR("[guardado] crear «{}»: NO se ha podido crear {}", data.file_name(),
-                 rex::path_to_utf8(package_path));
+  // Non-throwing on purpose. The throwing overload is what killed the process on a save: the
+  // exception escaped into the deferred-completion dispatcher, which has nothing to catch it, and
+  // the run ended with "[FATAL] Dispatch thread: deferred completion threw 'create_directories:
+  // Access is denied.'". A save that cannot be created is a result code, not a crash.
+  std::error_code ec;
+  std::filesystem::create_directories(package_path, ec);
+  if (ec) {
+    REXSYS_ERROR("[guardado] crear «{}»: NO se ha podido crear {}: {} ({})", data.file_name(),
+                 rex::path_to_utf8(package_path), ec.message(), ec.value());
     return X_ERROR_ACCESS_DENIED;
   }
   auto package = ResolvePackage(root_name, xuid, data);

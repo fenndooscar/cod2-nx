@@ -94,8 +94,20 @@ Done and verified on Windows (see [docs/building.md](docs/building.md)):
   cannot place.
 - **Got Call of Duty 2 running on a PC.** With the two fixes above and `app/huecos.toml` regenerated from this game
   (112 entries, all with bodies), the game starts, mounts the game root, brings up D3D12, SDL input and audio,
-  creates its threads, loads 35 MB of game data from `assets/game_root` and runs for about three minutes before it
-  dies with a fail-fast (`0xC0000409`) and no log line. It no longer dies on a codegen hole. See "Not done" 5.
+  creates its threads, loads 35 MB of game data from `assets/game_root` and draws. Two crashes stood between that and
+  a run that stays up:
+  - **A mistranslated jump table.** The code generator read the null test of a `bctr` guard (`cmpi cr6, r11, 0`) as the
+    table's upper bound, so a four-entry table came out with a single `case 0` and every other index reached the
+    `__builtin_trap()` of the default case. The process died of `STATUS_ILLEGAL_INSTRUCTION` with no log line.
+    `sdk/src/codegen/function_scanner.cpp` now stops at a comparison against zero instead of reading it as a bound.
+    Of the 294 switch tables in this game, this was the only one it got wrong.
+  - **A save that killed the process.** `ContentManager::CreateContent` and `WriteContentHeaderFile` used the throwing
+    `std::filesystem::create_directories`. They run inside the deferred-completion dispatcher, which has nothing to
+    catch an exception, so a save that could not be written ended the run with
+    `[FATAL] Dispatch thread: deferred completion threw 'create_directories: Access is denied.'` instead of returning
+    an error code. Both now use the non-throwing overload and return `X_ERROR_ACCESS_DENIED`.
+
+  With those two, the game runs indefinitely and draws a scene. See "Not done" 5 for what it does not do yet.
 
 Not done, in the order they have to happen:
 
@@ -106,10 +118,12 @@ Not done, in the order they have to happen:
    at, so this is the first thing that can block everything.
 4. **Re-derive `app/overrides.toml`** for CoD2's addresses. `app/huecos.toml` is done: 112 entries, regenerated from
    this game's own generated code with `tools/huecos.py` and checked with `tools/comprobar_huecos.py`.
-5. **Find the fail-fast that ends the PC run** (about three minutes in, `0xC0000409`, nothing in the log). The
-   nine unresolved branches left in `app/codegen.log` are the first suspects: they are `REX_FATAL` calls in the
-   generated code, and one of them firing would be a different error, so the fail-fast is elsewhere — but a wrong
-   function boundary in any of those three areas can corrupt anything downstream.
+5. **Find out what the game is drawing.** The process now stays up and presents frames, but consecutive frames differ
+   in every pixel (a mean of 53–75 per channel over 3.1 M of 3.69 M pixels) and no legible text has been found in any
+   capture, so it is not a menu and not normal gameplay. Either the game is still early in its startup sequence and
+   the picture is a loading state, or the presenter path is handing over the wrong surface or format. The nine
+   unresolved branches left in `app/codegen.log` are worth clearing first: they are `REX_FATAL` calls in the
+   generated code, and a wrong function boundary in any of those three areas can corrupt anything downstream.
 6. **Replace the app's game-specific code** (`app/src/cod2_*.cpp`): the hooks, the D3D trace, the native renderer,
    the audio server — all of it is still the other game's, and it is parked in `app/src/aparcado/` rather than
    compiled.

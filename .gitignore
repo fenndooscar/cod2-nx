@@ -33,6 +33,7 @@ build/
 *.elf
 *.o
 *.obj
+*.exe
 *.a
 *.log
 *.err
@@ -64,3 +65,9 @@ __pycache__/
 .vscode/
 graphify-out/
 mesa/mesa-switch
+# Ghidra's project database. The Ghidra GUI creates it in the repository root when the project is
+# opened from here; nothing in it belongs to the port.
+cod2-nx.rep/
+cod2-nx.gpr
+cod2-nx.lock
+cod2-nx.lock~
