@@ -108,6 +108,11 @@ u32 XamContentCreateEnumerator_entry(u32 user_index, u32 device_id, u32 content_
   }
 
   REXKRNL_DEBUG("XamContentCreateEnumerator: added {} items to enumerator", e->item_count());
+  // The menu decides whether to offer "Continue Campaign" from somewhere, and the port's log showed no
+  // content call at all while sitting on that menu - so either the game never enumerates, or it
+  // enumerates and this line never ran. It is one line per enumeration and it says which.
+  REXKRNL_INFO("[guardado] enumerar: usuario {} dispositivo {:08X} tipo {:08X} -> {} elemento(s)",
+               user_index, device_id, content_type, e->item_count());
 
   *handle_out = e->handle();
   return X_ERROR_SUCCESS;

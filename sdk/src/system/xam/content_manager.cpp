@@ -479,6 +479,8 @@ X_RESULT ContentManager::OpenContent(const std::string_view root_name, uint64_t 
   {
     auto global_lock = global_critical_region_.Acquire();
     if (open_packages_.count(string::string_key_case(root_name))) {
+      REXSYS_WARN("[guardado] abrir «{}» (raiz {}): ya estaba abierta, se devuelve ALREADY_EXISTS",
+                  data.file_name(), root_name);
       return X_ERROR_ALREADY_EXISTS;
     }
   }

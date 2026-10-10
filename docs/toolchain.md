@@ -94,12 +94,17 @@ weak alias (copy the called function into the caller), not in the same file and 
 improve the game code.
 
 **The fix:** `tools/llamadas_directas.py` rewrites `sub_X(ctx, base);` as `__imp__sub_X(ctx, base);` whenever `sub_X`
-has no hook: 79,612 of the 83,077 calls in this game.
+has no hook: 49,420 of the 51,676 calls in this game, leaving 217 hooked addresses.
 
 - A function counts as hooked if its address appears anywhere in the app's sources, the SDK or the configuration
   files. Hooks are sometimes built by joining pieces of names (`sub_##addr`), so searching for
   `REX_HOOK_RAW(sub_...)` is not enough. Check with `nm` that every `sub_` defined in the compiled files is on the list
   of hooked ones.
+- **The scan skips `app/src/aparcado` and nothing else.** That test used to be written against the list of
+  subdirectories (`'aparcado' not in ds`) instead of the directory's own path (`'aparcado' not in d`), and `ds` for
+  `app/src` *contains* `aparcado` — so the whole of `app/src` was skipped with it. Every hook declared in a top-level
+  `app/src` file was invisible, its call sites kept the `__imp__` form, and the hook was never reached: a hook that
+  logs the game's console printed nothing, with no error to say why.
 - The table used for indirect calls is not touched, so indirect calls still reach the hooks.
 - `--deshacer` ("undo") reverts the rewrite.
 - A new code generation silently loses the direct calls. Run the tool again after every code generation.

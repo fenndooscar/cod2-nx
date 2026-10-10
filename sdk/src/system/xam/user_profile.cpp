@@ -95,11 +95,14 @@ UserProfile::UserProfile() {
   AddSetting(std::make_unique<BinarySetting>(0x63E83FFD));
 }
 
-void UserProfile::AddSetting(std::unique_ptr<Setting> setting) {
+void UserProfile::AddSetting(std::unique_ptr<Setting> setting, bool persistir) {
   Setting* previous_setting = setting.get();
   std::swap(settings_[setting->setting_id], previous_setting);
 
-  if (setting->is_set && setting->is_title_specific()) {
+  // Only a setting the game wrote is saved. The constructor adds this runtime's own defaults with
+  // is_set already true, and writing those would put the defaults on disk over whatever the game had
+  // saved before it ever got to read them back.
+  if (persistir && setting->is_set) {
     SaveSetting(setting.get());
   }
 
@@ -123,66 +126,81 @@ UserProfile::Setting* UserProfile::GetSetting(uint32_t setting_id) {
     return nullptr;
   }
   UserProfile::Setting* setting = it->second;
-  if (setting->is_title_specific()) {
-    // If what we have loaded in memory isn't for the title that is running
-    // right now, then load it from disk.
-    if (kernel_state_->title_id() != setting->loaded_title_id) {
-      LoadSetting(setting);
-    }
+  // Loaded on first use, whatever the setting is, for the same reason LoadSetting persists every
+  // setting: the gate here was is_title_specific(), so a setting the game wrote under an id that is
+  // not title-specific was created fresh by the constructor with its default and never read back.
+  // Writing it and then not reading it is indistinguishable from losing it, and Call of Duty 2's
+  // campaign position is one of those settings - the save file on disk is correct and the game
+  // still resumes at the first mission.
+  if (kernel_state_->title_id() != setting->loaded_title_id) {
+    LoadSetting(setting);
   }
   return setting;
 }
 
 void UserProfile::LoadSetting(UserProfile::Setting* setting) {
-  if (setting->is_title_specific()) {
-    auto content_dir = kernel_state_->content_manager()->ResolveGameUserContentPath();
-    auto setting_id = fmt::format("{:08X}", setting->setting_id);
-    auto file_path = content_dir / setting_id;
-    auto file = rex::filesystem::OpenFile(file_path, "rb");
-    if (file) {
-      fseek(file, 0, SEEK_END);
-      uint32_t input_file_size = static_cast<uint32_t>(ftell(file));
-      fseek(file, 0, SEEK_SET);
+  // Every setting is persisted, not only the title-specific ones.
+  //
+  // Xenia gates this on is_title_specific() because on a real console the non-title-specific ones live
+  // in the profile container, which it does not implement - so it refuses to write them rather than
+  // invent a place for them. Here there is no container either, but there is a place: the same
+  // per-title directory, keyed by setting_id, which is unique across both kinds. Refusing meant that a
+  // setting the game wrote came back as its default on the next run, and that is indistinguishable from
+  // the game forgetting it.
+  //
+  // Call of Duty 2's campaign position is a saved dvar (sv_lastSaveGame, in the game's own string table)
+  // and the game writes its dvars as profile settings. Dropped on the way out, the next run has no
+  // "last save" to continue from and starts the campaign at its first mission.
+  auto content_dir = kernel_state_->content_manager()->ResolveGameUserContentPath();
+  auto setting_id = fmt::format("{:08X}", setting->setting_id);
+  auto file_path = content_dir / setting_id;
+  auto file = rex::filesystem::OpenFile(file_path, "rb");
+  if (file) {
+    fseek(file, 0, SEEK_END);
+    uint32_t input_file_size = static_cast<uint32_t>(ftell(file));
+    fseek(file, 0, SEEK_SET);
 
-      std::vector<uint8_t> serialized_data(input_file_size);
-      fread(serialized_data.data(), 1, serialized_data.size(), file);
-      fclose(file);
-      setting->Deserialize(serialized_data);
-      setting->loaded_title_id = kernel_state_->title_id();
-    }
+    std::vector<uint8_t> serialized_data(input_file_size);
+    fread(serialized_data.data(), 1, serialized_data.size(), file);
+    fclose(file);
+    setting->Deserialize(serialized_data);
+    REXSYS_INFO("[perfil] leido {:08X} tipo {}: {} byte(s) de {}", setting->setting_id,
+                setting->type, serialized_data.size(), rex::path_to_utf8(file_path));
   } else {
-    // Unsupported for now.  Other settings aren't per-game and need to be
-    // stored some other way.
-    REXSYS_WARN("Attempting to load unsupported profile setting from disk");
+    // Not an error: most settings are simply not there the first time. It is logged because "the game
+    // read its setting and got the default" and "the game never asked" look identical in the log
+    // otherwise, and that difference is the whole question.
+    REXSYS_INFO("[perfil] {:08X} tipo {}: no hay fichero en {}", setting->setting_id, setting->type,
+                rex::path_to_utf8(file_path));
   }
+  setting->loaded_title_id = kernel_state_->title_id();
 }
 
 void UserProfile::SaveSetting(UserProfile::Setting* setting) {
-  if (setting->is_title_specific()) {
-    auto serialized_setting = setting->Serialize();
-    auto content_dir = kernel_state_->content_manager()->ResolveGameUserContentPath();
-    // The throwing overload used to kill the whole process: when the profile folder cannot be created,
-    // std::filesystem_error escapes the guest call, nothing catches it, and the game dies with
-    // 0xC0000409 (stack: _Throw_fs_error -> SaveSetting, see app/src/cod2_pc_excepciones.cpp).
-    // A setting that cannot be written is not worth the session, so the failure is reported instead.
-    std::error_code ec;
-    std::filesystem::create_directories(content_dir, ec);
-    if (ec) {
-      REXSYS_ERROR("No se ha podido crear la carpeta de perfil «{}» para el ajuste {:08X}: {} ({})",
-                   rex::path_to_utf8(content_dir), setting->setting_id, ec.message(), ec.value());
-      return;
-    }
-    auto setting_id = fmt::format("{:08X}", setting->setting_id);
-    auto file_path = content_dir / setting_id;
-    auto file = rex::filesystem::OpenFile(file_path, "wb");
-    if (file) {
-      fwrite(serialized_setting.data(), 1, serialized_setting.size(), file);
-      fclose(file);
-    }
+  auto serialized_setting = setting->Serialize();
+  auto content_dir = kernel_state_->content_manager()->ResolveGameUserContentPath();
+  // The throwing overload used to kill the whole process: when the profile folder cannot be created,
+  // std::filesystem_error escapes the guest call, nothing catches it, and the game dies with
+  // 0xC0000409 (stack: _Throw_fs_error -> SaveSetting, see app/src/cod2_pc_excepciones.cpp).
+  // A setting that cannot be written is not worth the session, so the failure is reported instead.
+  std::error_code ec;
+  std::filesystem::create_directories(content_dir, ec);
+  if (ec) {
+    REXSYS_ERROR("No se ha podido crear la carpeta de perfil «{}» para el ajuste {:08X}: {} ({})",
+                 rex::path_to_utf8(content_dir), setting->setting_id, ec.message(), ec.value());
+    return;
+  }
+  auto setting_id = fmt::format("{:08X}", setting->setting_id);
+  auto file_path = content_dir / setting_id;
+  auto file = rex::filesystem::OpenFile(file_path, "wb");
+  if (file) {
+    fwrite(serialized_setting.data(), 1, serialized_setting.size(), file);
+    fclose(file);
+    REXSYS_INFO("[perfil] escrito {:08X} tipo {}: {} byte(s) en {}", setting->setting_id,
+                setting->type, serialized_setting.size(), rex::path_to_utf8(file_path));
   } else {
-    // Unsupported for now.  Other settings aren't per-game and need to be
-    // stored some other way.
-    REXSYS_WARN("Attempting to save unsupported profile setting to disk");
+    REXSYS_ERROR("[perfil] NO se ha podido escribir {:08X} en {}", setting->setting_id,
+                 rex::path_to_utf8(file_path));
   }
 }
 

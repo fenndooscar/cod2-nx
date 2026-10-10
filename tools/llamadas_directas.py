@@ -36,8 +36,14 @@ def enganchadas():
         else:
             # app/src/aparcado holds the fork's hooks, which are not compiled (see its README): their
             # addresses are not hooks of this build and must not stop the direct-call rewrite.
+            #
+            # The test is on the directory's own path, not on `ds`, and that is the whole point: `ds` is
+            # the list of subdirectories, so for app/src itself it *contains* 'aparcado' and the root was
+            # skipped along with the folder. Every hook in a top-level app/src file was therefore
+            # invisible here, its call stayed `__imp__sub_X`, and the hook was never called: a file that
+            # logs the game's console printed nothing at all, with no error to say why.
             rutas = [os.path.join(d, f) for d, ds, fs in os.walk(raiz)
-                     if 'aparcado' not in ds
+                     if 'aparcado' not in d
                      for f in fs
                      if not f.endswith(('.a', '.obj', '.o', '.png', '.jpg', '.bin'))]
         for ruta in rutas:

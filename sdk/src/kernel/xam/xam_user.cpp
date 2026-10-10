@@ -284,12 +284,28 @@ uint32_t XamUserReadProfileSettingsEx(uint32_t title_id, uint32_t user_index, ui
   return X_ERROR_SUCCESS;
 }
 
+// Which settings the game asks for, and whether it got them. One line per guest call: a game that
+// reads a setting, is answered with the default, and then starts the campaign from its beginning
+// looks exactly like a game that never asked, unless this line exists.
+static void AnotarAjustesLeidos(uint32_t setting_count, be<uint32_t>* setting_ids, uint32_t result) {
+  if (!setting_ids || !setting_count || setting_count > 32) {
+    return;
+  }
+  std::string ids;
+  for (uint32_t i = 0; i < setting_count; ++i) {
+    ids += fmt::format("{}{:08X}", i ? " " : "", static_cast<uint32_t>(setting_ids[i]));
+  }
+  REXKRNL_INFO("[perfil] leer {} ajuste(s) [{}] -> {:08X}", setting_count, ids, result);
+}
+
 u32 XamUserReadProfileSettings_entry(u32 title_id, u32 user_index, u32 xuid_count, mapped_u64 xuids,
                                      u32 setting_count, mapped_u32 setting_ids,
                                      mapped_u32 buffer_size_ptr, mapped_void buffer_ptr,
                                      ppc_ptr_t<XAM_OVERLAPPED> overlapped) {
-  return XamUserReadProfileSettingsEx(title_id, user_index, xuid_count, xuids, setting_count,
-                                      setting_ids, 0, buffer_size_ptr, buffer_ptr, overlapped);
+  auto result = XamUserReadProfileSettingsEx(title_id, user_index, xuid_count, xuids, setting_count,
+                                             setting_ids, 0, buffer_size_ptr, buffer_ptr, overlapped);
+  AnotarAjustesLeidos(setting_count, setting_ids, result);
+  return result;
 }
 
 u32 XamUserReadProfileSettingsEx_entry(u32 title_id, u32 user_index, u32 xuid_count,
@@ -297,13 +313,25 @@ u32 XamUserReadProfileSettingsEx_entry(u32 title_id, u32 user_index, u32 xuid_co
                                        mapped_u32 buffer_size_ptr, u32 unk_2,
                                        mapped_void buffer_ptr,
                                        ppc_ptr_t<XAM_OVERLAPPED> overlapped) {
-  return XamUserReadProfileSettingsEx(title_id, user_index, xuid_count, xuids, setting_count,
-                                      setting_ids, unk_2, buffer_size_ptr, buffer_ptr, overlapped);
+  auto result =
+      XamUserReadProfileSettingsEx(title_id, user_index, xuid_count, xuids, setting_count,
+                                   setting_ids, unk_2, buffer_size_ptr, buffer_ptr, overlapped);
+  AnotarAjustesLeidos(setting_count, setting_ids, result);
+  return result;
 }
 
 u32 XamUserWriteProfileSettings_entry(u32 title_id, u32 user_index, u32 setting_count,
                                       ppc_ptr_t<X_USER_PROFILE_SETTING> settings,
                                       ppc_ptr_t<XAM_OVERLAPPED> overlapped) {
+  // Before the guards, deliberately. The only log line this entry point had was inside the loop,
+  // past the `user_index` check, so a write the runtime refused left no trace at all: "the game
+  // never asked to save" and "the game asked and was told no" looked the same, and the campaign
+  // position that never survives a mission is exactly that difference. The user index is in the
+  // line because 0 is the only one this runtime serves.
+  REXKRNL_INFO("[perfil] escribir {} ajuste(s) indice {} desde {} (solapado {})", setting_count,
+               user_index, static_cast<uint32_t>(settings.guest_address()),
+               overlapped ? static_cast<uint32_t>(overlapped.guest_address()) : 0u);
+
   if (!setting_count || !settings) {
     return X_ERROR_INVALID_PARAMETER;
   }
@@ -325,14 +353,25 @@ u32 XamUserWriteProfileSettings_entry(u32 title_id, u32 user_index, u32 setting_
     const X_USER_PROFILE_SETTING& setting = settings[n];
 
     auto setting_type = static_cast<UserProfile::Setting::Type>(setting.data.type);
-    if (setting_type == UserProfile::Setting::Type::UNSET) {
-      continue;
-    }
 
-    REXKRNL_DEBUG(
-        "XamUserWriteProfileSettings: setting index [{}]:"
-        " from={} setting_id={:08X} data.type={}",
-        n, (uint32_t)setting.from, (uint32_t)setting.setting_id, setting.data.type);
+    // The game does not fill in the type byte. sub_822CA8A8 builds its two records on its own stack
+    // (stwu r1,-208) and stores exactly five fields - from, user_index, setting_id, binary.size and
+    // binary.ptr - so `type` is whatever the frame happened to hold. Observed live, from one call:
+    //
+    //   id 63E83FFF  tipo 00 (CONTENT)  size 0x122  ptr 0x8414AF38
+    //   id 63E83FFE  tipo FF (UNSET)    size 0x176  ptr 0x8414AB50
+    //
+    // Both carry a length and a pointer; the second is the campaign progress (mis_01..mis_10), and
+    // this guard is what threw it away. Dropping a record that names a buffer because a byte the game
+    // never wrote is stale is the bug, not the record. A record with no length and no pointer is
+    // genuinely unset and still skipped.
+    if (setting_type == UserProfile::Setting::Type::UNSET) {
+      if (!static_cast<uint32_t>(setting.data.binary.size) &&
+          !static_cast<uint32_t>(setting.data.binary.ptr)) {
+        continue;
+      }
+      setting_type = UserProfile::Setting::Type::BINARY;
+    }
 
     switch (setting_type) {
       case UserProfile::Setting::Type::CONTENT:
@@ -349,18 +388,50 @@ u32 XamUserWriteProfileSettings_entry(u32 title_id, u32 user_index, u32 setting_
           bytes.resize(binary_size, 0);
         }
         user_profile->AddSetting(
-            std::make_unique<xam::UserProfile::BinarySetting>(setting.setting_id, bytes));
+            std::make_unique<xam::UserProfile::BinarySetting>(setting.setting_id, bytes), /*persistir=*/true);
       } break;
-      case UserProfile::Setting::Type::WSTRING:
-      case UserProfile::Setting::Type::DOUBLE:
-      case UserProfile::Setting::Type::FLOAT:
-      case UserProfile::Setting::Type::INT32:
-      case UserProfile::Setting::Type::INT64:
-      case UserProfile::Setting::Type::DATETIME:
+      case UserProfile::Setting::Type::INT32: {
+        user_profile->AddSetting(std::make_unique<xam::UserProfile::Int32Setting>(
+            setting.setting_id, setting.data.s32), /*persistir=*/true);
+      } break;
+      case UserProfile::Setting::Type::INT64: {
+        user_profile->AddSetting(std::make_unique<xam::UserProfile::Int64Setting>(
+            setting.setting_id, setting.data.s64), /*persistir=*/true);
+      } break;
+      case UserProfile::Setting::Type::DOUBLE: {
+        user_profile->AddSetting(std::make_unique<xam::UserProfile::DoubleSetting>(
+            setting.setting_id, setting.data.f64), /*persistir=*/true);
+      } break;
+      case UserProfile::Setting::Type::FLOAT: {
+        user_profile->AddSetting(std::make_unique<xam::UserProfile::FloatSetting>(
+            setting.setting_id, setting.data.f32), /*persistir=*/true);
+      } break;
+      case UserProfile::Setting::Type::DATETIME: {
+        user_profile->AddSetting(std::make_unique<xam::UserProfile::DateTimeSetting>(
+            setting.setting_id, setting.data.filetime), /*persistir=*/true);
+      } break;
+      case UserProfile::Setting::Type::WSTRING: {
+        std::u16string texto;
+        if (setting.data.unicode.ptr && setting.data.unicode.size >= 2) {
+          const uint16_t* origen =
+              REX_KERNEL_MEMORY()->TranslateVirtual<const uint16_t*>(setting.data.unicode.ptr);
+          const size_t caracteres = setting.data.unicode.size / 2;
+          texto.resize(caracteres);
+          for (size_t i = 0; i < caracteres; ++i) {
+            texto[i] = memory::load_and_swap<uint16_t>(origen + i);
+          }
+          // The size counts the terminator, and the setting carries its own.
+          while (!texto.empty() && texto.back() == u'\0') {
+            texto.pop_back();
+          }
+        }
+        user_profile->AddSetting(
+            std::make_unique<xam::UserProfile::UnicodeSetting>(setting.setting_id, texto), /*persistir=*/true);
+      } break;
       default: {
         REXKRNL_ERROR("XamUserWriteProfileSettings: Unimplemented data type {}", setting_type);
       } break;
-    };
+    }
   }
 
   if (overlapped) {

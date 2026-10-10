@@ -74,9 +74,18 @@ def ventana_invitado(proceso):
     import os
     import re
 
-    logs = sorted(glob.glob(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                         "..", "..", "app", "out", "pc", "logs", "cod2_*.log")),
-                  key=os.path.getmtime)
+    # Both places a run can leave its log: the build tree (tools/build.ps1 and a direct launch) and the
+    # folder tools/pc/jugar.ps1 runs from, which is where the game normally is. Looking in only one of
+    # them reports "no se encontro la ventana de memoria de invitado" against a game that is running.
+    aqui = os.path.dirname(os.path.abspath(__file__))
+    candidatos = [
+        os.path.join(aqui, "..", "..", "app", "out", "pc", "logs"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "cod2-nx", "pc", "logs"),
+    ]
+    logs = []
+    for carpeta in candidatos:
+        logs += glob.glob(os.path.join(carpeta, "cod2_*.log"))
+    logs.sort(key=os.path.getmtime)
     for ruta in reversed(logs):
         for linea in open(ruta, encoding="utf-8", errors="ignore"):
             m = re.search(r"Guest memory arena mapped: virtual base 0x([0-9A-Fa-f]+)", linea)

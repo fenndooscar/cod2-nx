@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <cstring>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -73,6 +74,26 @@ struct X_USER_PROFILE_SETTING {
 };
 static_assert_size(X_USER_PROFILE_SETTING, 40);
 
+// The on-disk form of a setting is its value and nothing else: the file name is the setting_id, so a
+// header would be redundant. Only BinarySetting had a Serialize/Deserialize pair; every other setting
+// inherited the empty default in Setting, so writing one to disk produced an empty file and reading it
+// back did nothing. That is why a setting the game wrote came back as its default.
+template <typename T>
+inline std::vector<uint8_t> BytesDe(const T& valor) {
+  std::vector<uint8_t> salida(sizeof(T));
+  std::memcpy(salida.data(), &valor, sizeof(T));
+  return salida;
+}
+
+template <typename T>
+inline bool BytesA(const std::vector<uint8_t>& datos, T& valor) {
+  if (datos.size() < sizeof(T)) {
+    return false;
+  }
+  std::memcpy(&valor, datos.data(), sizeof(T));
+  return true;
+}
+
 class UserProfile {
  public:
   class SettingByteStream : public stream::ByteStream {
@@ -129,6 +150,10 @@ class UserProfile {
       Setting::Append(data, stream);
       data->s32 = value;
     }
+    std::vector<uint8_t> Serialize() const override { return BytesDe(value); }
+    void Deserialize(std::vector<uint8_t> data) override {
+      if (BytesA(data, value)) is_set = true;
+    }
   };
   struct Int64Setting : public Setting {
     Int64Setting(uint32_t setting_id, int64_t value)
@@ -138,6 +163,10 @@ class UserProfile {
       Setting::Append(data, stream);
       data->s64 = value;
     }
+    std::vector<uint8_t> Serialize() const override { return BytesDe(value); }
+    void Deserialize(std::vector<uint8_t> data) override {
+      if (BytesA(data, value)) is_set = true;
+    }
   };
   struct DoubleSetting : public Setting {
     DoubleSetting(uint32_t setting_id, double value)
@@ -146,6 +175,10 @@ class UserProfile {
     void Append(X_USER_PROFILE_SETTING_DATA* data, SettingByteStream* stream) override {
       Setting::Append(data, stream);
       data->f64 = value;
+    }
+    std::vector<uint8_t> Serialize() const override { return BytesDe(value); }
+    void Deserialize(std::vector<uint8_t> data) override {
+      if (BytesA(data, value)) is_set = true;
     }
   };
   struct UnicodeSetting : public Setting {
@@ -168,6 +201,14 @@ class UserProfile {
         memory::copy_and_swap(buffer, (uint16_t*)value.data(), count);
       }
     }
+    std::vector<uint8_t> Serialize() const override {
+      return std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(value.data()),
+                                  reinterpret_cast<const uint8_t*>(value.data() + value.size()));
+    }
+    void Deserialize(std::vector<uint8_t> data) override {
+      value.assign(reinterpret_cast<const char16_t*>(data.data()), data.size() / 2);
+      is_set = true;
+    }
   };
   struct FloatSetting : public Setting {
     FloatSetting(uint32_t setting_id, float value)
@@ -176,6 +217,10 @@ class UserProfile {
     void Append(X_USER_PROFILE_SETTING_DATA* data, SettingByteStream* stream) override {
       Setting::Append(data, stream);
       data->f32 = value;
+    }
+    std::vector<uint8_t> Serialize() const override { return BytesDe(value); }
+    void Deserialize(std::vector<uint8_t> data) override {
+      if (BytesA(data, value)) is_set = true;
     }
   };
   struct BinarySetting : public Setting {
@@ -212,6 +257,10 @@ class UserProfile {
       Setting::Append(data, stream);
       data->filetime = value;
     }
+    std::vector<uint8_t> Serialize() const override { return BytesDe(value); }
+    void Deserialize(std::vector<uint8_t> data) override {
+      if (BytesA(data, value)) is_set = true;
+    }
   };
 
   UserProfile();
@@ -223,7 +272,8 @@ class UserProfile {
 
   void set_kernel_state(KernelState* ks) { kernel_state_ = ks; }
 
-  void AddSetting(std::unique_ptr<Setting> setting);
+  // persistir: save it to disk now. The constructor leaves it false (see the definition).
+  void AddSetting(std::unique_ptr<Setting> setting, bool persistir = false);
   Setting* GetSetting(uint32_t setting_id);
 
  private:

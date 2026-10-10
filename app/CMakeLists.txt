@@ -18,6 +18,9 @@ include(generated/rexglue.cmake)
 # Sources
 set(COD2_SOURCES
     src/main.cpp
+    # The game's own console, in the log (cvar cod2_consola, off by default). Works on both platforms:
+    # the sink it replaces is the game's, not the runtime's.
+    src/cod2_consola.cpp
     # Profile dump of the instrumented build for PGO (COD2_PGO=generar; empty otherwise).
     src/cod2_pgo.cpp
 )

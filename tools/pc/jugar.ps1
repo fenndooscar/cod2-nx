@@ -20,10 +20,14 @@
 #
 # Usage: powershell -ExecutionPolicy Bypass -File tools\pc\jugar.ps1
 #        powershell -ExecutionPolicy Bypass -File tools\pc\jugar.ps1 -Destino D:\cod2
+#        powershell -ExecutionPolicy Bypass -File tools\pc\jugar.ps1 -Esperar     # waits, then says how it ended
+#        powershell -ExecutionPolicy Bypass -File tools\pc\jugar.ps1 -Extra --log-level=debug
 param(
   [string]$Destino = (Join-Path $env:LOCALAPPDATA 'cod2-nx\pc'),
   [string]$GameDataRoot = '',
-  [switch]$SinCopiar
+  [switch]$SinCopiar,
+  [switch]$Esperar,
+  [string[]]$Extra = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -56,12 +60,48 @@ Write-Output "runtime en $Destino ($copiados fichero(s) copiado(s))"
 
 # The saves go next to the runtime, outside the repository, so they are readable and writable and
 # easy to find. --store_shaders=false keeps the shader cache from growing a second copy of the data.
+#
+# An extra argument is quoted when it contains a space. Start-Process joins the list with spaces and
+# adds no quoting of its own, so '--cl=+set ui_nextMission 2' would arrive at the runtime as two
+# arguments and the cvar would be left with '+set'. The guest command line (--cl) is exactly the kind
+# of argument that needs one.
 $args = @(
   "--game_data_root=$GameDataRoot",
   "--user_data_root=$(Join-Path $Destino 'datos')",
   '--store_shaders=false'
-)
+) + ($Extra | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } })
 $p = Start-Process -FilePath (Join-Path $Destino 'cod2.exe') -ArgumentList $args `
   -WorkingDirectory $Destino -PassThru
 Write-Output "cod2.exe pid $($p.Id)"
 Write-Output "registro: $(Join-Path $Destino 'logs')"
+
+if ($Esperar) {
+  # Why this exists. A run was reported as "it crashed after the second mission" and the log simply
+  # stopped: no [FATAL], no logs/excepciones.txt, no Windows Error Reporting entry for cod2.exe. The
+  # game had not crashed at all - a rebuild had called Stop-Process on it four seconds after its save.
+  # Nothing recorded that, and the log of a killed process and the log of a crash look identical,
+  # because both are a file that ends. The exit code is what tells them apart, and until now nothing
+  # read it.
+  $p.WaitForExit()
+  # The switch is on the formatted hex and not on the number: PowerShell parses 0xFFFFFFFF as Int32 -1,
+  # and a process killed by TerminateProcess reports exactly -1, so a numeric switch silently falls
+  # through to the default for the one case that matters most.
+  $texto = '{0:X8}' -f ($p.ExitCode -band 0xFFFFFFFFL)
+  $que = switch ($texto) {
+    '00000000' { 'salio por su cuenta, sin error' }
+    'FFFFFFFF' { 'lo mataron desde fuera con TerminateProcess (Stop-Process / taskkill /F)' }
+    '00000001' { 'lo mataron desde fuera (cerrar la ventana a la fuerza)' }
+    'C0000005' { 'violacion de acceso; mira logs/excepciones.txt y logs/pilas_*.txt' }
+    'C000001D' { 'instruccion ilegal; mira logs/excepciones.txt' }
+    'C0000409' { 'fail-fast (__fastfail: abort, /GS o el comprobador del monton); logs/excepciones.txt lo dice' }
+    'C000013A' { 'Ctrl+C o cierre de consola' }
+    default    { 'no esta en la lista de arriba: busca este codigo antes de culpar al port' }
+  }
+  Write-Output "cod2.exe termino: 0x$texto - $que"
+  $exc = Join-Path $Destino 'logs\excepciones.txt'
+  if (Test-Path -LiteralPath $exc) {
+    Write-Output "excepciones: $exc ($((Get-Item -LiteralPath $exc).Length) B)"
+  } else {
+    Write-Output "excepciones: no hay $exc, asi que el port no vio ninguna excepcion"
+  }
+}

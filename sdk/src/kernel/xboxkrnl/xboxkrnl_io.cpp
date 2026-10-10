@@ -55,6 +55,20 @@ REXCVAR_DEFINE_INT32(cod2_io_aviso_ms, 8, "Filesystem",
                      "Avisa en el log de cada apertura o lectura que pase de estos ms (0 = nunca).");
 REXCVAR_DEFINE_INT32(cod2_io_resumen_s, 15, "Filesystem",
                      "Cada cuantos segundos se escribe el resumen [io] (0 = nunca).");
+/*
+ * The name of every file the game opens.
+ *
+ * It was impossible to answer "what is the game loading right now?" from the log. The only place a path
+ * was written was Cod2AnotarApertura, and that one fires for .wmv files only - it feeds the native video
+ * decoder and Call of Duty 2 has none (its cutscenes are .bik). The [io] summary counts opens and the
+ * per-call timing warns about slow ones, and neither says which file it was. So a run that reads 110 MB
+ * per 15 s cannot be told apart from one stuck rereading a single fastfile.
+ *
+ * Off by default: a level load is thousands of lines.
+ */
+REXCVAR_DEFINE_BOOL(cod2_io_nombres, false, "Filesystem",
+                    "Escribe en el log el nombre de cada fichero que el juego abre. Apagado por defecto: "
+                    "una carga de nivel son miles de lineas.");
 
 namespace rex::kernel::xboxkrnl {
 using namespace rex::system;
@@ -345,6 +359,12 @@ inline void AnotarApertura(uint64_t us, bool ok, const std::string_view ruta) {
       g_io_avisos.fetch_add(1, std::memory_order_relaxed) < 300) {
     REXKRNL_WARN("[io] LENTO: abrir '{}' tardo {:.1f} ms ({})", ruta, us / 1000.0,
                  ok ? "abierto" : "no existe");
+  }
+
+  // cod2_io_nombres. Written before the callers' own logging so the order in the file is the order the
+  // game asked for things, which is the whole point of turning it on.
+  if (REXCVAR_GET(cod2_io_nombres)) {
+    REXKRNL_INFO("[io] abre '{}'{}", ruta, ok ? "" : " (no existe)");
   }
 }
 
