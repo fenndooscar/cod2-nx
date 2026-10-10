@@ -108,6 +108,19 @@ Done and verified on Windows (see [docs/building.md](docs/building.md)):
     an error code. Both now use the non-throwing overload and return `X_ERROR_ACCESS_DENIED`.
 
   With those two, the game runs indefinitely and draws a scene. See "Not done" 5 for what it does not do yet.
+- **Found why the game died intermittently after a save, and fixed it: the guest `longjmp` was returning.** The run
+  ended with an access violation inside `rexruntime.dll`, in `HostToGuestFunction<RtlLeaveCriticalSection_entry>`, on
+  a guest pointer of `0x00000238` — a value with no business being a pointer. The guest `lr` at the fault was
+  `0x8233AC50`, the instruction right after the `RtlLeaveCriticalSection` call in `Com_Error` (`0x8233AB80`), and the
+  argument came from `r27`. `Com_Error` reaches that call through a `longjmp`, and `app/overrides.toml` declared no
+  `longjmp_address`, so the generator emitted an ordinary call: it *returns* into the next instruction, which the
+  original only reaches by branching. The guest `longjmp` (`0x8229BF80`) restores `r13`–`r31` and `r1` out of the
+  buffer it is handed, so after it "returned" `r27` held whatever the `setjmp` site had. Both addresses are now
+  declared (`setjmp_address = 0x8229F930`, `longjmp_address = 0x8229BF80`, derived from this game's own generated
+  code), so the generator emits `ppc_longjmp`/`ppc_setjmp` and the jump never comes back. Two traps here, both
+  silent: the keys are **root keys**, so at the bottom of `overrides.toml` they land inside `[functions]` and the
+  codegen ignores them without a word (the first attempt regenerated zero files); and an undeclared `longjmp` does
+  not fail — it runs the game's code down a path it never takes.
 - **Found why the game loses its saves *and* its gamepad when it is started from inside this repository.**
   A process whose executable lives under the repository runs with a restricted, low-integrity token
   (`S-1-16-4096`); the same bytes copied anywhere else run at medium (`S-1-16-8192`). Measured with
@@ -141,13 +154,12 @@ Not done, in the order they have to happen:
    (`sdk/thirdparty/FFmpeg/config_cod2_wmv3.h` is still a WMV3 configuration).
 9. **Unpack the `.ff` fastfiles** before scanning for shader containers, then build `cod2_shaders.nfsp`.
 10. **Record a PGO profile** on the console.
-11. **Find why a save sometimes kills the run.** After a save, and regardless of whether the save succeeded, the
-    game's own save thread can die with `Unhandled guest access violation: read of guest 0x0000004C` — a null base
-    plus a field offset, so a guest object the save path expected is not there. It is intermittent (the same save
-    succeeds in most runs), so the first thing needed is the instruction, not the address:
-    `app/src/cod2_pc_excepciones.cpp` now writes the host instruction and a stack for the first few unhandled
-    access violations into `logs/excepciones.txt`, and `tools/pc/direccion.py` turns those into the
-    `sub_XXXXXXXX` of the generated code.
+11. **Write the missing `XamUserWriteProfileSettings` setting types.** The port logs
+    `XamUserWriteProfileSettings: Unimplemented data type 189` (`sdk/src/kernel/xam/xam_user.cpp`, which handles only
+    `CONTENT` and `BINARY`); 189 is outside the SDK's `Setting::Type` enum, so the value has to be read out of this
+    game's own `default.xex` before it can be given a meaning.
+12. **Clear the nine unresolved branches** left in `app/codegen.log`. They are `REX_FATAL` calls in the generated
+    code, and a wrong function boundary in any of those three areas can corrupt anything downstream.
 
 ## Requirements
 
