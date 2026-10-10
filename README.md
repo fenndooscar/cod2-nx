@@ -10,12 +10,14 @@ A work-in-progress native Nintendo Switch port of the Xbox 360 version of **Call
 recompilation with [ReXGlue](https://github.com/rexglue/rexglue-sdk).
 
 > [!IMPORTANT]
-> **Nothing has been recompiled for Call of Duty 2 yet.** This repository is a hard fork of
-> [nfsmw-nx](https://github.com/StevensND/nfsmw-nx) at commit `4e3ffc24fe80285189f2cea601606c529d5f1b97`, with the
-> identifiers and file names renamed from `nfsmw` to `cod2`. The reusable machinery (the Switch layer in `sdk/`, the
-> Mesa patch, the shader tooling, the build scripts) is in place. Everything that knows about *this specific game*
-> still contains Need for Speed: Most Wanted's addresses and code, and has to be re-derived from Call of Duty 2's own
-> `default.xex`. **No NRO builds yet.**
+> **The port runs.** This repository is a hard fork of [nfsmw-nx](https://github.com/StevensND/nfsmw-nx) at commit
+> `4e3ffc24fe80285189f2cea601606c529d5f1b97`, with the identifiers and file names renamed from `nfsmw` to `cod2`.
+> Call of Duty 2's `default.xex` has been translated with ReXGlue, and the translated program runs on Windows: it
+> starts, mounts the game root, brings up D3D12, input and audio, loads its data and draws. **The Switch NRO now
+> builds too** (`app/out/sw8/cod2.nro`, 44 MB) against a Mesa/NVK SDK built from this repository's patch. What is
+> *not* verified is the game running on the console, and gameplay as opposed to the menu — see "Not done".
+> Everything that names an address, a hook or a measured number is still being re-derived from this game's own
+> `default.xex`; treat any value inherited from the fork as a checklist of *what to look for*, not as an answer.
 
 ## What Call of Duty 2 is, technically
 
@@ -130,6 +132,16 @@ Done and verified on Windows (see [docs/building.md](docs/building.md)):
   `SDL_EVENT_GAMEPAD_ADDED` and the pad is simply absent. Neither is in the port's own code. The fix is to run the
   binaries from outside the repository: `tools/pc/jugar.ps1` copies them somewhere writable and points
   `--game_data_root` back at `assets/game_root`.
+- **Built the NVK driver and linked the first Switch NRO.** `mesa/mesa-switch-cod2.patch` applies cleanly to
+  mesa-switch at `1a8c1a66d6f`, `build-unified.sh` runs to `[143/143]`, and the SDK stages with `libEGL.a`, `libGL.a`,
+  `libGLESv1_CM.a`, `libGLESv2.a`, `libglapi.a` and `libvulkan.a` (87 MB, NAK inside it). `tools/build.ps1` then
+  produces `app/out/sw8/cod2.nro`, 44 MB. Three things blocked it, all silent or misleading, and all three are
+  written up in [mesa/README.md](mesa/README.md): `MESA_SWITCH_RUST_TARGET` has to be exported or `ninja` compiles
+  NAK for the host (200 errors that look like broken Rust); `switch-libdrm_nouveau` cannot be downloaded —
+  `pkg.devkitpro.org` answers with a Cloudflare 403 — so the portlib is built from its four `.c` files with
+  devkitPro's own MSYS2 `make`, and working around it by pointing the switch winsys at the **drm** winsys' `nouveau.h`
+  compiles but links objects into the wrong list; and `sdk/cmake/rexglue_switch.cmake` no longer names `zstd`, which
+  devkitPro does not package and which `nm --undefined-only` proves nothing in the link needs.
 
 Not done, in the order they have to happen:
 
@@ -149,7 +161,9 @@ Not done, in the order they have to happen:
 6. **Replace the app's game-specific code** (`app/src/cod2_*.cpp`): the hooks, the D3D trace, the native renderer,
    the audio server — all of it is still the other game's, and it is parked in `app/src/aparcado/` rather than
    compiled.
-7. **Build the NVK driver** (`mesa/README.md`) and produce a first NRO.
+7. **Run the NRO on the console.** It builds and links, and has never been executed on real hardware: that needs a
+   Switch with homebrew enabled. The SD card layout it expects is `sdmc:/switch/cod2-nx/` (see
+   [docs/building.md](docs/building.md)).
 8. **Add a Bink path** over FFmpeg for the cutscenes, and the matching FFmpeg decoders
    (`sdk/thirdparty/FFmpeg/config_cod2_wmv3.h` is still a WMV3 configuration).
 9. **Unpack the `.ff` fastfiles** before scanning for shader containers, then build `cod2_shaders.nfsp`.
@@ -178,6 +192,8 @@ Everything below is needed for steps 1–6. Verified installed on the machine th
 | no `clangarm64` packages | step 3 (ARM64 binaries cannot run on x86-64, and the wrapper picks them by executable bit) | clean: 0 packages, directory gone |
 | `SPIRV-Tools` + `LLVMSPIRVLib` | step 3 (the host pass builds `mesa_clc`, which makes both required) | installed: 2026.3.1 and 22.1.0.0 |
 | **`MESA_SWITCH_RUSTC`** pointing at the GNU toolchain's `rustc.exe` | step 3 (without it `build-unified.sh` exits 2, and the MSVC default cannot link Meson's Rust probe) | set it once as a Windows **user** env var — not a package |
+| **`MESA_SWITCH_RUST_TARGET`** = `aarch64-unknown-linux-gnu` | step 3 (only `build-unified.sh` exports it; a bare `ninja` compiles NAK for the host) | export it in the shell you rebuild from |
+| **`switch-libdrm_nouveau`** | step 3 (the Switch nouveau winsys needs its `struct nouveau_list`; the package cannot be downloaded) | built from source and installed into `C:/devkitPro/portlibs/switch` |
 | Vulkan SDK | step 7 (DXC, spirv-val) | installed (1.4.363.0); `Bin` is on the machine `PATH`, so MSYS2 sees `dxc` and `spirv-val` too |
 | MinGW g++ and Emscripten | step 7, browser tools | both in MSYS2 **UCRT64** (`/ucrt64/bin/g++` = gcc 16.2.0, `/ucrt64/lib/emscripten/emcc` = 6.0.10). The shader script is a `.sh`, so run it from a UCRT64 shell, not from PowerShell |
 | Your own copy of Call of Duty 2 for Xbox 360 | everything | you must provide it |

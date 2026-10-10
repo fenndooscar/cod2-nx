@@ -106,7 +106,9 @@ Every line below was verified by running something, not by reading a package lis
 
 ### What is still missing
 
-One item, and it is not a package — one environment variable.
+Nothing. **`build-unified.sh` has been run on this machine and produced a complete SDK**, and the NRO links against it.
+The three items below are the ones that had to be solved to get there, kept because each one fails silently or with a
+message that points somewhere else.
 
 1. **`MESA_SWITCH_RUSTC`, pointing at the GNU toolchain's `rustc` directly.**
 
@@ -152,14 +154,73 @@ One item, and it is not a package — one environment variable.
 
    Nothing else in the package list is required. `C:/msys64/clang64/bin/cmake.exe` is declared in the host cross file
    but nothing in the Mesa build calls it, and `C:/msys64/clangarm64/bin/cbindgen.exe` is declared in the native file
-   but no `rust.cbindgen()` call exists in Mesa's `meson.build`, so Meson never resolves either. Switch portlibs are
-   not needed at all: `portlibs/switch/{include,lib}` are the *output* of this build
-   (`--prefix=/opt/devkitpro/portlibs/switch` plus `DESTDIR`), and the one portlib-shaped input, expat, is vendored as
-   `subprojects/expat.wrap` and built from source.
+   but no `rust.cbindgen()` call exists in Mesa's `meson.build`, so Meson never resolves either.
 
-`build-unified.sh` itself has still not been run: that needs a mesa-switch checkout with the patch applied, and there
-is none on this machine yet. Everything above is the cross files, the wrapper scripts, Mesa's own `meson.build` and the
-actual binaries checked against the filesystem — not a build log.
+2. **`MESA_SWITCH_RUST_TARGET` on every `ninja` run that is not `build-unified.sh`.**
+
+   `rustc-switch-wrapper.sh` reads it (`RUST_TARGET=${MESA_SWITCH_RUST_TARGET:-}`) and **silently drops `--target`
+   when it is empty**. `build-unified.sh` exports it (`export MESA_SWITCH_RUST_TARGET="${...:-aarch64-unknown-linux-gnu}"`),
+   so a full run through that script is fine — but the fast iteration path, `ninja -C builddir-unified`, inherits
+   nothing and compiles NAK for the **host**:
+
+   ```
+   error[E0461]: couldn't find crate `bitview` with expected target triple x86_64-pc-windows-gnu
+   error[E0432]: unresolved import `RegLatencySM100`
+   ```
+
+   Those 200-odd errors are one missing variable, not a broken build. Export it before any `ninja`:
+
+   ```sh
+   export MESA_SWITCH_RUST_TARGET=aarch64-unknown-linux-gnu
+   ```
+
+3. **`switch-libdrm_nouveau`, which is not installable and has to be built from source.**
+
+   The Switch build of Mesa's `nouveau` winsys needs the portlib's flat `nouveau.h`, which defines
+   `struct nouveau_list` — the list type `nouveau_switch_libdrm.h` and `nouveau_switch_pushbuf.c` are written against,
+   and which exists in **no** header of the mesa-switch tree. Without it:
+
+   ```
+   nouveau_switch_libdrm.h:200:8: error: invalid use of undefined type 'struct nouveau_list'
+   ```
+
+   `pacman -S switch-libdrm_nouveau` cannot fetch it here: `pkg.devkitpro.org` answers the MSYS2 and the Windows curl
+   alike with a Cloudflare `403 Sorry, you have been blocked` page. Build it from source instead — the package is a
+   plain Makefile over four `.c` files, and devkitPro ships its own MSYS2 with a working `make`:
+
+   ```sh
+   curl -sSkL -o ldn.tar.gz \
+     https://github.com/devkitPro/libdrm_nouveau/archive/v1.0.1/libdrm_nouveau-src-1.0.1.tar.gz
+   tar -xzf ldn.tar.gz
+   cd libdrm_nouveau-1.0.1
+   C:/devkitPro/msys2/usr/bin/bash.exe -lc \
+     "cd '$PWD' && export DEVKITPRO=/opt/devkitpro && make install"
+   ```
+
+   That installs `include/nouveau.h`, `include/nouveau_drm.h`, `include/nvif/` and `lib/libdrm_nouveau.a` into
+   `portlibs/switch`. Note that `C:/msys64/opt/devkitpro` is a junction to `C:/devkitPro`, so this is the same tree the
+   MSYS2 build reads.
+
+   Do **not** work around it by adding `include_directories('../drm')` to
+   `src/gallium/winsys/nouveau/switch/meson.build` and pointing the header at `src/gallium/winsys/nouveau/drm/nouveau.h`.
+   That resolves `struct nouveau_list` to a *different* struct with a *different* layout (upstream's `list_head`-based
+   one), and the two list implementations would be mixed at runtime — the objects would be linked into the wrong list.
+   It compiles; it is wrong.
+
+### zstd is not linked any more
+
+`sdk/cmake/rexglue_switch.cmake` used to name `zstd` in `target_link_libraries`, taken from Mesa's own
+`VulkanConfig.cmake`. devkitPro does not package `switch-libzstd`, so the NRO link stopped at:
+
+```
+ld.exe: cannot find -lzstd
+```
+
+Nothing in the link needs it. `nm --undefined-only` over every archive of `sdk/out/switch-arm64` and over the Mesa
+SDK's `libvulkan.a`, `libEGL.a`, `libnvk.a`, `libnil.a` and `libmesa_util.a` reports **zero** undefined `ZSTD_*`
+symbols. The name is only there because Mesa's config lists it and this port does not use `find_package(Vulkan)` (see
+the comment in `rexglue_switch.cmake`: the Mesa config wants `libelf`, which devkitPro also does not package).
+
 
 ## Getting the same driver as the released NROs
 
@@ -195,11 +256,34 @@ actual binaries checked against the filesystem — not a build log.
    from a dirty checkout". (Committing the patch instead works too.)
 
    ```sh
+   export MESA_SWITCH_RUSTC="$USERPROFILE/.rustup/toolchains/stable-x86_64-pc-windows-gnu/bin/rustc.exe"
    ALLOW_DIRTY=1 ./build-unified.sh
    ```
 
-   Later rebuilds are quicker with `build_mesa_msys2.sh`, in this folder, which has no such check. The result is an SDK
-   folder.
+   From PowerShell, with the same environment the MSYS2 shell needs:
+
+   ```powershell
+   $env:MSYSTEM = 'CLANG64'
+   $env:MESA_SWITCH_RUSTC = "$env:USERPROFILE\.rustup\toolchains\stable-x86_64-pc-windows-gnu\bin\rustc.exe"
+   $env:MESA_SWITCH_RUST_TARGET = 'aarch64-unknown-linux-gnu'
+   & C:\msys64\usr\bin\bash.exe -lc "cd /c/.../mesa-switch && ALLOW_DIRTY=1 ./build-unified.sh"
+   ```
+
+   Later rebuilds are quicker with `ninja -C builddir-unified` (remember `MESA_SWITCH_RUST_TARGET`), and the SDK is
+   staged with:
+
+   ```sh
+   meson install -C builddir-unified --destdir "$PWD/mesa-unified-install"
+   ```
+
+   `--destdir` must be an absolute POSIX path. A relative one is taken as relative to the **build directory**, so
+   `--destdir $PWD/mesa-unified-install` from a Windows shell that has already mangled `$PWD` lands the tree at
+   `builddir-unified/Users…/mesa-unified-install`. Quote it and let MSYS2 expand it.
+
+   Verified end to end on this machine: the build reaches `[143/143]`, the SDK stages with all of `libEGL.a`,
+   `libGL.a`, `libGLESv1_CM.a`, `libGLESv2.a`, `libglapi.a` and `libvulkan.a` (87 MB), and `tools/build.ps1` then
+   links `app/out/sw8/cod2.nro` (44 MB).
+
 4. Tell the app where that SDK folder is when you configure it:
    `-DREXGLUE_SWITCH_NVK_SDK=<sdk>/opt/devkitpro/portlibs/switch`. The whole process is in
    [docs/building.md](../docs/building.md).

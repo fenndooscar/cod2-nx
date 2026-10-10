@@ -74,9 +74,12 @@ Speed: Most Wanted; it has not been adapted yet.
 
 Follow [mesa/README.md](../mesa/README.md): build [mesa-switch](https://github.com/danfromtico/mesa-switch) at commit
 `1a8c1a66d6f` with `mesa/mesa-switch-cod2.patch` applied. That page also lists what has to be installed first — the
-MSYS2 **CLANG64** host tools, a native gcc and a Rust toolchain with the `aarch64-unknown-linux-gnu` target. None of
-them come with devkitPro. The result is an SDK folder. The app needs its subfolder
-`opt/devkitpro/portlibs/switch`, which contains `lib/libvulkan.a`.
+MSYS2 **CLANG64** host tools, a native gcc, a Rust toolchain with the `aarch64-unknown-linux-gnu` target, and
+`switch-libdrm_nouveau` built from source (devkitPro's package server refuses to serve it). None of them come with
+devkitPro. The result is an SDK folder. The app needs its subfolder `opt/devkitpro/portlibs/switch`, which contains
+`lib/libvulkan.a`.
+
+Verified on this machine: the driver builds, stages, and `tools/build.ps1` links the NRO against it.
 
 ## 4. Build the code generator
 

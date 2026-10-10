@@ -10,6 +10,10 @@ set -u
 MESA=${MESA:?set MESA to the mesa-switch source tree}
 export DEVKITPRO=${DEVKITPRO:-/opt/devkitpro}
 export RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-stable-x86_64-pc-windows-gnu}
+# rustc-switch-wrapper.sh reads MESA_SWITCH_RUST_TARGET and silently drops --target when it is empty, which
+# compiles NAK for the host and buries the build in ~200 Rust errors. build-unified.sh exports it; a bare ninja
+# run does not, so this script has to.
+export MESA_SWITCH_RUST_TARGET=${MESA_SWITCH_RUST_TARGET:-aarch64-unknown-linux-gnu}
 INSTALL=${INSTALL:-$MESA/mesa-unified-install}
 cd "$MESA" || exit 1
 echo "== ninja"

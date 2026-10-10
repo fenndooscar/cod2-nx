@@ -31,9 +31,14 @@ if(NOT TARGET rex::nvk)
         "${REXGLUE_SWITCH_NVK_SDK}/lib"
         "${DEVKITPRO}/portlibs/switch/lib"
         "${DEVKITPRO}/libnx/lib")
+    # No zstd: devkitPro has no switch-libzstd package and nothing in the link
+    # needs it.  `nm --undefined-only` over every archive of the SDK and of the
+    # Mesa SDK's libvulkan.a/libEGL.a/libnvk.a/libnil.a/libmesa_util.a reports
+    # zero undefined ZSTD_* symbols.  It is here because Mesa's VulkanConfig
+    # names it, and find_package is not used (see above).
     target_link_libraries(rexglue_switch_nvk INTERFACE
-        vulkan expat zstd z nx
-        vulkan expat zstd z nx
+        vulkan expat z nx
+        vulkan expat z nx
         stdc++ m)
     target_link_options(rexglue_switch_nvk INTERFACE -pthread)
 endif()
