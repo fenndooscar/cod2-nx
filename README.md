@@ -160,10 +160,24 @@ Not done, in the order they have to happen:
    at, so this is the first thing that can block everything.
 4. **Re-derive `app/overrides.toml`** for CoD2's addresses. `app/huecos.toml` is done: 111 entries, regenerated from
    this game's own generated code with `tools/huecos.py` and checked with `tools/comprobar_huecos.py`.
-5. **Find out what the game is drawing.** The process now stays up and presents frames, but consecutive frames differ
-   in every pixel (a mean of 53–75 per channel over 3.1 M of 3.69 M pixels) and no legible text has been found in any
-   capture, so it is not a menu and not normal gameplay. Either the game is still early in its startup sequence and
-   the picture is a loading state, or the presenter path is handing over the wrong surface or format.
+5. **Find out what the game is drawing.** It is further along than the last note here claimed, and the earlier
+   "smooth gradient" reading was wrong: it came from analysing a capture that was never checked against the window's
+   own pixels. What is measured now, from the runtime's own log and from the file system:
+   - The game **walks the whole startup movie sequence** — `legal.bik`, `atvi.bik`, `IW_logo.bik`, `cod2_intro.bik`,
+     `cod2_attract.bik` — and then **loads real levels**: `movie_eastern_load.ff` + `movie_eastern.ff`, and
+     `moscow_load.ff` + `moscow.ff` (the first campaign mission). A run that was sent keystrokes instead loaded
+     `demolition.ff`, a multiplayer map. So it gets past the movies, reacts to input and streams level data.
+   - It streams **~110 MB per 15 s continuously, and 100 % of it is re-reads** of ranges already read
+     (`rangos: 915 releidas de 918 (100 %)`). That is either the attract loop or a level loader with no working
+     cache; `cod2_io_rangos_mb` is 64 and reports `0 entradas vivas`, so the range cache is not catching these
+     (3075 reads fall under the 256 KB floor and are not cached at all). Worth fixing before blaming the renderer.
+   - The window is 2560x1440 and renders a **structured scene**, not noise: local block std of 25+ over most of the
+     lower half, `|pixel − neighbour|` around 2.4, and `tools/pc/mapa.py` shows a bright region top-right with a
+     large bright mass along the bottom. No legible text has been found in a full-resolution crop yet.
+   - The game's own `Com_Error` buffer (`0x83D45480`, read with `tools/pc/vigilar_error.py`) held
+     `Game session no longer available` in one run and stayed empty for the first 25 s of another, so it is written
+     late, not at startup. Nothing of it reaches the port's log.
+   Next: identify the scene by reading the game's console, not by guessing from pixels.
 6. **Replace the app's game-specific code** (`app/src/cod2_*.cpp`): the hooks, the D3D trace, the native renderer,
    the audio server — all of it is still the other game's, and it is parked in `app/src/aparcado/` rather than
    compiled.
@@ -171,15 +185,18 @@ Not done, in the order they have to happen:
    Switch with homebrew enabled. The SD card layout it expects is `sdmc:/switch/cod2-nx/` (see
    [docs/building.md](docs/building.md)).
 8. **Add a Bink path** over FFmpeg for the cutscenes, and the matching FFmpeg decoders
-   (`sdk/thirdparty/FFmpeg/config_cod2_wmv3.h` is still a WMV3 configuration).
+   (`sdk/thirdparty/FFmpeg/config_cod2_wmv3.h` is still a WMV3 configuration). This is **not** optional polish any
+   more: the game opens five `.bik` files in sequence before it reaches anything else (step 5 above), so the movie
+   path sits on the critical path to the main menu.
 9. **Unpack the `.ff` fastfiles** before scanning for shader containers, then build `cod2_shaders.nfsp`.
 10. **Record a PGO profile** on the console.
 11. **Write the missing `XamUserWriteProfileSettings` setting types.** The port logs
     `XamUserWriteProfileSettings: Unimplemented data type 189` (`sdk/src/kernel/xam/xam_user.cpp`, which handles only
     `CONTENT` and `BINARY`); 189 is outside the SDK's `Setting::Type` enum, so the value has to be read out of this
     game's own `default.xex` before it can be given a meaning.
-12. **Clear the nine unresolved branches** left in `app/codegen.log`. They are `REX_FATAL` calls in the generated
-    code, and a wrong function boundary in any of those three areas can corrupt anything downstream.
+
+~~12. Clear the nine unresolved branches.~~ Done: `app/codegen.log` reports zero. The cause was `dataPointerScan`
+declaring functions inside functions, and one hand-added entry in `app/huecos.toml`; both are fixed.
 
 ## Requirements
 
