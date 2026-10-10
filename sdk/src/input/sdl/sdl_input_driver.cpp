@@ -113,6 +113,21 @@ void SDLInputDriver::OnWindowAvailable(rex::ui::Window* window) {
         }
       }
       REXLOG_INFO("SDL input driver initialized successfully");
+
+      // The "added" events for pads that are already connected when the subsystem
+      // starts are raised during SDL_InitSubSystem, before the event watch above can
+      // see them, and SDL only raises them once. Saying what SDL has right now makes
+      // a silent pad visible in the log instead of leaving it to be guessed at.
+      // Both counts, because a joystick SDL refuses to call a gamepad is a mapping
+      // problem and a joystick SDL does not have at all is a driver problem.
+      int gamepads_now = 0;
+      SDL_JoystickID* gamepads = SDL_GetGamepads(&gamepads_now);
+      SDL_free(gamepads);
+      int joysticks_now = 0;
+      SDL_JoystickID* joysticks = SDL_GetJoysticks(&joysticks_now);
+      SDL_free(joysticks);
+      REXLOG_INFO("SDL enumerates {} joystick(s), {} gamepad(s) at startup.", joysticks_now,
+                  gamepads_now);
     });
   }
 }

@@ -28,6 +28,11 @@
 //     place it was thrown from. The first throws also get a stack. One line each and never through the
 //     logger, because a throw can come from inside the logger and this has to survive it.
 //   * A vectored exception handler for the fail-fast itself, in case it ever is delivered.
+//   * A vectored exception handler for an access violation the SDK did not claim, which is the one
+//     that kills the process. The SDK's own line names the guest address that was touched and not the
+//     instruction that touched it, so this adds the host instruction and a stack for the first few.
+//     `Unhandled guest access violation: read of guest 0x0000004C` is a null base plus a field
+//     offset, and only the instruction says which field of which object was expected there.
 //
 //   The addresses are host addresses; tools/pc/direccion.py turns them into the sub_XXXXXXXX of the
 //   generated code, using logs/simbolos.csv (see cod2_pc_simbolos.cpp).
@@ -69,10 +74,13 @@ REXCVAR_DEFINE_BOOL(cod2_pc_excepciones, true, "COD2",
 
 constexpr DWORD kFalloRapido = 0xC0000409;  // STATUS_STACK_BUFFER_OVERRUN, what __fastfail raises
 constexpr DWORD kExcepcionCpp = 0xE06D7363; // the code MSVC's throw uses
+constexpr DWORD kViolacionAcceso = 0xC0000005;
 constexpr int kMarcos = 24;
 constexpr int kConPila = 16;  // how many thrown exceptions get their stack written
+constexpr int kViolacionesConPila = 4;  // and how many access violations
 
 std::atomic<int> g_lanzadas{0};
+std::atomic<int> g_violaciones{0};
 bool g_hablando = false;  // only read and written from the reporter below
 
 const char* NombreSubcodigo(ULONG_PTR subcodigo) {
@@ -232,12 +240,49 @@ void DescribirExcepcion(const EXCEPTION_RECORD& r, char* salida, size_t tam) {
 
 LONG CALLBACK ManejadorExcepciones(EXCEPTION_POINTERS* info) {
   const EXCEPTION_RECORD& r = *info->ExceptionRecord;
-  if (r.ExceptionCode != kFalloRapido && r.ExceptionCode != kExcepcionCpp) {
+  if (r.ExceptionCode != kFalloRapido && r.ExceptionCode != kExcepcionCpp &&
+      r.ExceptionCode != kViolacionAcceso) {
     return EXCEPTION_CONTINUE_SEARCH;
   }
   if (!REXCVAR_GET(cod2_pc_excepciones)) {
     return EXCEPTION_CONTINUE_SEARCH;
   }
+
+  // An access violation the SDK did not claim is the one that kills the process. The SDK's own line
+  // says which guest address was touched, and the guest address alone does not say where from: this
+  // adds the host instruction, which tools/pc/direccion.py turns into a sub_XXXXXXXX. Only the first
+  // few get a stack, because a run that is dying can raise a great many of them.
+  if (r.ExceptionCode == kViolacionAcceso) {
+    const int numero = g_violaciones.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (numero > kViolacionesConPila) {
+      return EXCEPTION_CONTINUE_SEARCH;
+    }
+    g_hablando = true;
+    const uint64_t tocado = r.NumberParameters > 1 ? uint64_t(r.ExceptionInformation[1]) : 0;
+    char linea[1024];
+    std::snprintf(linea, sizeof(linea),
+                  "VIOLACION DE ACCESO %d: %s de 0x%016llX en %s", numero,
+                  r.NumberParameters > 0 && r.ExceptionInformation[0] ? "escritura" : "lectura",
+                  static_cast<unsigned long long>(tocado),
+                  DondeEsta(info->ContextRecord->Rip).c_str());
+    EscribirCrudoYLog(linea);
+    void* marcos[kMarcos] = {};
+    const USHORT cuantos = RtlCaptureStackBackTrace(0, kMarcos, marcos, nullptr);
+    for (USHORT i = 0; i < cuantos; ++i) {
+      const uint64_t marco = uint64_t(reinterpret_cast<uintptr_t>(marcos[i]));
+      std::snprintf(linea, sizeof(linea), "  marco %2u: 0x%016llX  %s", i,
+                    static_cast<unsigned long long>(marco), DondeEsta(marco).c_str());
+      EscribirCrudoYLog(linea);
+    }
+    if (auto logger = rex::GetLogger()) {
+      logger->flush();
+    }
+    if (numero == 1) {
+      cod2::perfil_pc::VolcarPilas("violacion");
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+  }
+
   g_hablando = true;
 
   // The thread is stopped here, so this is the exact place the exception was raised from.

@@ -108,6 +108,15 @@ Done and verified on Windows (see [docs/building.md](docs/building.md)):
     an error code. Both now use the non-throwing overload and return `X_ERROR_ACCESS_DENIED`.
 
   With those two, the game runs indefinitely and draws a scene. See "Not done" 5 for what it does not do yet.
+- **Found why the game loses its saves *and* its gamepad when it is started from inside this repository.**
+  A process whose executable lives under the repository runs with a restricted, low-integrity token
+  (`S-1-16-4096`); the same bytes copied anywhere else run at medium (`S-1-16-8192`). Measured with
+  `tools/pc/quien_soy.cpp`, which prints its own token and then tries to create a folder: from the repository
+  `ec=5` (`Access is denied`), from outside `ec=0`. Two symptoms follow, and both read like game bugs:
+  `XamContentCreate` cannot create its folder, and **SDL enumerates zero joysticks**, so the port never receives
+  `SDL_EVENT_GAMEPAD_ADDED` and the pad is simply absent. Neither is in the port's own code. The fix is to run the
+  binaries from outside the repository: `tools/pc/jugar.ps1` copies them somewhere writable and points
+  `--game_data_root` back at `assets/game_root`.
 
 Not done, in the order they have to happen:
 
@@ -132,6 +141,13 @@ Not done, in the order they have to happen:
    (`sdk/thirdparty/FFmpeg/config_cod2_wmv3.h` is still a WMV3 configuration).
 9. **Unpack the `.ff` fastfiles** before scanning for shader containers, then build `cod2_shaders.nfsp`.
 10. **Record a PGO profile** on the console.
+11. **Find why a save sometimes kills the run.** After a save, and regardless of whether the save succeeded, the
+    game's own save thread can die with `Unhandled guest access violation: read of guest 0x0000004C` — a null base
+    plus a field offset, so a guest object the save path expected is not there. It is intermittent (the same save
+    succeeds in most runs), so the first thing needed is the instruction, not the address:
+    `app/src/cod2_pc_excepciones.cpp` now writes the host instruction and a stack for the first few unhandled
+    access violations into `logs/excepciones.txt`, and `tools/pc/direccion.py` turns those into the
+    `sub_XXXXXXXX` of the generated code.
 
 ## Requirements
 
