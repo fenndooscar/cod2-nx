@@ -86,4 +86,11 @@ REXCVAR_DEFINE_UINT32(max_blocks_per_function, 10000, "Codegen",
     .lifecycle(rex::cvar::Lifecycle::kInitOnly)
     .range(1, 1000000);
 
+REXCVAR_DEFINE_BOOL(data_pointer_scan, true, "Codegen",
+                    "Treat a code address stored in .rdata/.data as a function entry point. "
+                    "Call of Duty 2 reaches its static initializer tables that way, and without "
+                    "this the game dies on the first one with 'Call to invalid or unregistered "
+                    "function'. Turn it off to compare against the old analysis.")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 // clang-format on

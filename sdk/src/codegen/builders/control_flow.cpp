@@ -45,6 +45,14 @@ bool build_b(BuilderContext& ctx) {
       break;
 
     case TargetKind::Unknown:
+      // Unknown to the graph, but this function has the label: the two
+      // disagree because the function is one of several overlapping ones, and
+      // classifyTarget asked the innermost of them. The label is emitted in
+      // this body, so the goto is right by construction.
+      if (ctx.fn.labels().count(target)) {
+        ctx.println("\tgoto loc_{:X};", target);
+        break;
+      }
       // Unknown target - fall back to range check
       if (target >= ctx.fn.base() && target < ctx.fn.end()) {
         ctx.println("\tgoto loc_{:X};", target);

@@ -31,13 +31,31 @@ code generator another way, run them afterwards, in this order.
 | File | What it does |
 |---|---|
 | `huecos.py`, `huecos_excluir.txt` ("gaps", "gaps to exclude") | Finds code the code generator's analysis left without a function and writes it to `app/huecos.toml`. `huecos_excluir.txt` lists the gaps to leave out. |
+| `comprobar_huecos.py` ("check gaps") | Checks that every address declared in `app/huecos.toml` got a body in the generated C++. A declaration without one is not a codegen error; it fails at link time as `undefined symbol: sub_XXXXXXXX`. Run it between the codegen and the build. |
+| `punteros_datos.py` ("data pointers") | Lists the addresses inside `.text` that the game's own data (`.rdata`, `.data`) points at: initializer tables, callback arrays, vtable slots. Those entry points are reached through a register, so branch following cannot find them. Reports which are already functions and which are not. |
 | `lee_antes.py` ("read before") | Lists, per recompiled function, the non-volatile registers (the ones a function must keep unchanged for its caller) it reads before writing them. See [docs/toolchain.md](../docs/toolchain.md#registers-as-c-locals) for why this matters. |
 | `calientes.py` ("hot ones") | Resolves the samples of the console profiler (`rex_perfil.log`) to functions, hottest first. Its output is the input for `app/orden_funciones.ld`, the list of functions placed first in the program ([function ordering](../docs/glossary.md#function-ordering)). |
 | `comprobar_clave_textura.py` ("check texture key") | Checks in the built ELF (the program before it is packed as an NRO) that the texture key is written before it is hashed. It catches an LTO/PGO aliasing pitfall (see [docs/toolchain.md](../docs/toolchain.md#an-lto-and-pgo-pitfall-strict-aliasing-in-xxhash)). |
+
+## PC diagnostics
+
+The PC build (`app/out/pc/cod2.exe`) is where a problem is easiest to look at, so these live next to it. They read
+what the port writes into `app/out/pc/logs/` (`cod2_pc_simbolos.cpp`, `cod2_pc_excepciones.cpp`,
+`cod2_perfil_pc.h`) and the linker map of the SDK.
+
+| File | What it does |
+|---|---|
+| `pc/direccion.py` ("address") | Turns a host address from a crash log into the `sub_XXXXXXXX+0xNN` the generated code speaks in, using `logs/simbolos.csv`. Accepts `0x...` or `base+0x...`. |
+| `pc/pilas.py` ("stacks") | Reads a `logs/pilas_N.txt` dump of every thread's stack and resolves each frame the same way. Options: `--hilo`, `--csv`, `--todos`. |
+| `pc/dllmap.py` | Resolves an offset inside the SDK's own `rexruntime.dll` to a function name. A stripped DLL has no symbols, so it bounds the function with `.pdata` first and only then looks the start address up in the linker map (`-DCMAKE_SHARED_LINKER_FLAGS=-Wl,/MAP`). |
+| `pc/pantalla.ps1` ("screen") | Captures the game window to a PNG (`-Salida`, default `app/out/pc/logs/pantalla.png`). Declares the process DPI aware first, or the capture is a scaled-down half-resolution copy. |
+| `pc/ventana.ps1` ("window") | Prints the game window's rectangle, its client rectangle and its title. |
+| `pc/vigilante_fallo.cpp` ("fault watcher") | A debugger that starts the game and prints the exception it dies of. Windows' own handler turns an unhandled C++ exception into `0xC0000409` and loses the type; under this one the same death is visible. Build: `cl /nologo /O2 /std:c++20 /EHsc /DPSAPI_VERSION=2 /Fe:tools\pc\vigilante_fallo.exe /Fo:tools\pc\ tools\pc\vigilante_fallo.cpp /link psapi.lib`. |
 
 ## Folders
 
 | Folder | What it has |
 |---|---|
+| `pc/` | The PC-only diagnostics above. Nothing here is built for the Switch. |
 | `switch/cmake/` | The CMake toolchain for devkitA64 and [libnx](../docs/glossary.md#libnx), `switch-devkitA64.cmake`: the file that tells CMake how to compile for the Switch. |
 | `editions/` | Support for the other editions: address matching, tree creation, checks, profile translation, per-edition build ([docs/editions.md](../docs/editions.md)). |

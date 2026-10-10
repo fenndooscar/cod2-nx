@@ -16,15 +16,21 @@ PowerShell), and it runs `meson`, `ninja`, `python`, `sed` and `git` **by name**
 passes to Meson name the compilers and tools by absolute path, so they have to exist exactly there.
 
 From `switch_cross_file_msys2.txt`, `switch_native_tools_msys2.txt` and `windows_x64_host_cross_file_msys2.txt` in the
-mesa-switch tree:
+mesa-switch tree. The **State** column is what was actually found on the machine this port is being prepared on, not
+what the files assume. Every row is verified; the two that are not "ok" are unused by Mesa, which is explained below.
 
-| Path | What it is |
-|---|---|
-| `C:/msys64/clang64/bin/clang.exe`, `clang++.exe`, `llvm-ar.exe`, `llvm-strip.exe`, `llvm-nm.exe`, `llvm-config.exe`, `pkg-config.exe`, `cmake.exe` | The **host** compiler that builds Mesa's own build tools (the shader compiler `mesa_clc` and `vtn_bindgen2`). These are the CLANG64 environment's, not MINGW64's. |
-| `C:/msys64/clangarm64/bin/cbindgen.exe` | Generates the Rust bindings. **Check this one on your machine**: it points at the CLANGARM64 environment, which is the one for Windows on ARM, while everything else in the same file is x86-64. If you are on x86-64 you may have to point it at your own `cbindgen`. |
-| `C:/msys64/usr/bin/bash.exe` | Runs the wrapper scripts |
-| `C:/msys64/ucrt64/bin/gcc.exe` or `C:/msys64/mingw64/bin/gcc.exe` or `C:/msys64/clang64/bin/gcc.exe` | A native compiler, only to link the small programs Meson uses to probe the Rust compiler. This port's patch tries all three; the original only tried the first. |
-| a Rust toolchain with the **`aarch64-unknown-linux-gnu`** target | NVK's shader compiler (NAK) is Rust, and it is cross-compiled for the Switch. A plain `rustup` install does **not** include that target: `rustup target add aarch64-unknown-linux-gnu`. `build-unified.sh` also accepts a cached toolchain in `build/deps/{cargo,rustup}`, or `MESA_SWITCH_RUSTC`. |
+| Path | What it is | State |
+|---|---|---|
+| `C:/msys64/clang64/bin/clang.exe`, `clang++.exe`, `llvm-ar.exe`, `llvm-strip.exe`, `llvm-nm.exe`, `llvm-config.exe`, `pkg-config.exe` | The **host** compiler that builds Mesa's own build tools (the shader compiler `mesa_clc` and `vtn_bindgen2`). These are the CLANG64 environment's, not MINGW64's. | ok (clang 22.1.8) |
+| `C:/msys64/clang64/bin/cmake.exe` | Declared in the host cross file. MSYS2 keeps `cmake` in its `msys` repo; `clang64/mingw-w64-clang-x86_64-cmake` does exist if it is ever needed. | missing — probably unused |
+| `C:/msys64/clangarm64/bin/cbindgen.exe` | Declared in the native file, but no `rust.cbindgen()` call exists in Mesa's `meson.build`, so Meson never resolves it. CLANGARM64 is the **Windows on ARM** environment. | irrelevant on x86-64 — see below |
+| `C:/msys64/usr/bin/bash.exe`, `sed.exe`, `flex.exe`, `bison.exe` | Run the wrapper scripts and the lexer/parser generators | ok |
+| `C:/msys64/ucrt64/bin/gcc.exe` (or `mingw64`, or `clang64`) | A native compiler, only to link the small programs Meson uses to probe the Rust compiler. This port's patch tries all three; the original only tried the first. `rustc-native-msys2-wrapper.sh` also hardcodes the `ucrt64` one as the proc-macro linker. | ok (gcc 16.2.0) |
+| a `bindgen` binary on the CLANG64 `PATH` | `bindgen-switch-wrapper.sh` looks for it in `MESA_SWITCH_BINDGEN`, then `/root/.cargo/bin/bindgen`, then `/clangarm64/bin/bindgen.exe`, then `command -v bindgen`. NVK's Rust needs it to read the C headers. | ok: `/clang64/bin/bindgen` |
+| `SPIRV-Tools` and `LLVMSPIRVLib` on the CLANG64 `pkg-config` path | The host build passes `-Dmesa-clc=enabled`, which makes `with_clc` true and turns both into required dependencies (`LLVMSPIRVLib` `>= 22.1, < 22.2`; `SPIRV-Tools` `>= 2024.1`). | ok: 22.1.0.0 and 2026.3.1 |
+| **devkitPro at `C:/msys64/opt/devkitpro`** | `switch_cross_file_msys2.txt` hardcodes the whole devkitA64 toolchain under `C:/msys64/opt/devkitpro/...`, and the bindgen wrapper's include paths too. A devkitPro installed at `C:/devkitPro` is **not** found on its own. | done via a junction |
+| a Rust toolchain with the **`aarch64-unknown-linux-gnu`** target | NVK's shader compiler (NAK) is Rust, and it is cross-compiled for the Switch. `rustup` does not include that target by default. | ok on both toolchains |
+| **no `clangarm64` packages** | That environment is ARM64 code; on an x86-64 host every binary in it fails with `Exec format error`, and the wrapper picks it by executable bit alone. | ok: 0 packages, directory gone — see below |
 
 In the MSYS2 **CLANG64** shell, the host tools come from one group:
 
@@ -32,17 +38,128 @@ In the MSYS2 **CLANG64** shell, the host tools come from one group:
 pacman -S --needed mingw-w64-clang-x86_64-toolchain \
   mingw-w64-clang-x86_64-llvm mingw-w64-clang-x86_64-meson \
   mingw-w64-clang-x86_64-pkgconf mingw-w64-clang-x86_64-ninja \
-  mingw-w64-clang-x86_64-python git
+  mingw-w64-clang-x86_64-python mingw-w64-clang-x86_64-git \
+  mingw-w64-clang-x86_64-rust-bindgen
 ```
+
+Note the `x86_64` in every name. `mingw-w64-clang-x86_64-git` is not optional: a plain CLANG64 shell has no `git` on
+`PATH` unless the package is installed or the shell was started with `-use-full-path`.
 
 The `llvm` package matters for a second reason: this port's patch adds `-Dshared-llvm=enabled` to the host build, so it
 links against MSYS2's shared LLVM instead of building LLVM from source (which takes hours and does not fit in 16 GB).
 That is also why the patch adds `'demangle'` to the LLVM modules list — with a shared LLVM, `llvm::demangle` lives in
 its own module and the link fails without it.
 
-`pacman` and this package list were **not** run on the machine this fork was prepared on (its MSYS2 has only the base
-packages). Treat the list as the starting point and let `meson setup` tell you what is still missing: it names every
-program and library it cannot find.
+### The CLANGARM64 trap (read this first)
+
+The mesa-switch MSYS2 files were written on **Windows on ARM**. `host-tool-msys2-wrapper.sh` opens with "Run an x64
+Mesa host tool from an **ARM64 MSYS2 build**", and `switch_native_tools_msys2.txt` points `cbindgen` at
+`C:/msys64/clangarm64/bin/`. On such a machine `clangarm64` is the native environment and `clang64` runs under
+emulation, so both work.
+
+On an **x86-64** machine they do not. `clangarm64` is ARM64 code, and Windows on x86-64 has no emulation for it: every
+binary there fails with `cannot execute binary file: Exec format error`. The trouble is that
+`bindgen-switch-wrapper.sh` chooses with `[ -x /clangarm64/bin/bindgen.exe ]` — the executable bit, **not** the
+architecture:
+
+```sh
+if [ -x /clangarm64/bin/clang.exe ]; then
+    CLANG_BIN=/clangarm64/bin/clang.exe
+```
+
+So *installing* the ARM64 packages silently breaks the build: the wrapper picks `/clangarm64/bin/bindgen.exe` and
+`/clangarm64/bin/clang.exe`, and `"$CLANG_BIN" -print-resource-dir` fails before bindgen is ever called. If you ever
+install them, remove them again:
+
+```sh
+pacman -Rns $(pacman -Qq | grep aarch64)
+```
+
+With `clangarm64` gone, both `if` tests fall through to their `else` branches, which are the correct x86-64 ones:
+`CLANG_BIN="$(command -v clang)"` resolves to `/clang64/bin/clang` (resource dir `C:/msys64/clang64/lib/clang/22`), and
+the include paths fall back to `${DEVKITPRO:-/opt/devkitpro}`, which reaches the junction. Nothing else needs the
+ARM64 environment. **This is the state on this machine now**: `pacman -Qq | grep -c aarch64` answers 0 and
+`/clangarm64` no longer exists.
+
+The rule for this build: every package name must contain `x86_64`, never `aarch64`.
+
+### What has been checked, and how
+
+Every line below was verified by running something, not by reading a package list.
+
+| Item | Check | Result |
+|---|---|---|
+| Host compilers | `/clang64/bin/{clang,clang++,llvm-ar,llvm-strip,llvm-nm,llvm-config,pkg-config}.exe` exist and run | clang/LLVM 22.1.8 |
+| Host build tools | `command -v meson ninja python sed git` in a **plain** CLANG64 shell | all five resolve |
+| devkitPro | `/opt/devkitpro/devkitA64/bin/aarch64-none-elf-{gcc,g++,gcc-ar,nm,strip}.exe`, `.../include`, `libnx/{include,lib}` | all present via the junction; g++ reports 16.1.0 |
+| `bindgen` | `command -v bindgen` in a plain CLANG64 shell | `/clang64/bin/bindgen` |
+| `bindgen` actually works | ran it on a header that `#include <switch.h>`, with the wrapper's injected `--target=aarch64-none-elf` and `-isystem` paths | emitted correct Rust bindings for devkitA64/libnx types |
+| `cbindgen` | `command -v cbindgen` | `/clang64/bin/cbindgen` (declared but unused by Mesa) |
+| SPIRV deps | `pkg-config --exists LLVMSPIRVLib SPIRV-Tools` | 22.1.0.0 and 2026.3.1, both inside Mesa's gates (`>= 22.1, < 22.2` and `>= 2024.1`) |
+| SPIRV libraries | `libLLVMSPIRVLib.a`/`.dll.a`, `libSPIRV-Tools*.a` in `/clang64/lib` | present |
+| `dep_clang` | `/clang64/lib/libclang-cpp.dll.a` | present, so `-Dshared-llvm=enabled` takes the shared branch |
+| Native probe linker | `/ucrt64/bin/gcc.exe` | gcc 16.2.0 |
+| Rust cross-compile | compiled an aarch64 `--emit=metadata` crate with both toolchains | both succeed |
+| Rust host probe | linked a native program with `-C linker=C:/msys64/ucrt64/bin/gcc.exe` | GNU toolchain: yes. MSVC: no |
+| `clangarm64` | `pacman -Qq \| grep -c aarch64`, `test -d /clangarm64` | 0 packages, directory gone |
+| Wrapper branch selection | replayed `bindgen-switch-wrapper.sh`'s `if`/`elif` chain | picks `/clang64/bin/bindgen` + `/clang64/bin/clang`, resource dir `C:/msys64/clang64/lib/clang/22` |
+
+### What is still missing
+
+One item, and it is not a package — one environment variable.
+
+1. **`MESA_SWITCH_RUSTC`, pointing at the GNU toolchain's `rustc` directly.**
+
+   `build-unified.sh` refuses to start unless one of three things exists: `$MESA_SWITCH_RUSTC`, the Docker path
+   `/root/.cargo/bin/rustc`, or a cached toolchain at `build/deps/{cargo,rustup}`. Neither of the last two exists on
+   Windows, so `MESA_SWITCH_RUSTC` has to be set. (The script itself only *checks* that the path is executable; the two
+   wrapper scripts read the variable and do the real work.)
+
+   The obvious value, the rustup proxy `~/.cargo/bin/rustc.exe`, is **not** enough on its own: the proxy follows the
+   *default* toolchain, which is `stable-x86_64-pc-windows-msvc`, and MSVC rustc cannot link the small host program
+   Meson uses to probe the compiler — it hands `/NOLOGO`, `/OUT:` and `kernel32.lib` to the `ucrt64` gcc that
+   `rustc-switch-wrapper.sh` hardcodes as the fallback linker. Verified both ways: MSVC toolchain → link fails, GNU
+   toolchain → link succeeds.
+
+   So point the variable straight at the GNU toolchain's binary. That skips the proxy and its default-toolchain lookup
+   entirely, which means `RUSTUP_TOOLCHAIN` is not needed at all:
+
+   ```
+   MESA_SWITCH_RUSTC = C:\Users\<you>\.rustup\toolchains\stable-x86_64-pc-windows-gnu\bin\rustc.exe
+   ```
+
+   Set it once as a Windows **user** environment variable — MSYS2 inherits the Windows environment, so both the MSYS2
+   shell and anything launched from it see it. Both path spellings work in MSYS2 (`C:\...` and `/c/...`).
+
+   Verified with no `RUSTUP_TOOLCHAIN` set anywhere: `[ -x "$MESA_SWITCH_RUSTC" ]` passes, an
+   `--target=aarch64-unknown-linux-gnu` metadata build succeeds (the cross path), and a native link through
+   `-C linker=C:/msys64/ucrt64/bin/gcc.exe` succeeds (the host-probe path).
+
+   **Do not set `RUSTUP_TOOLCHAIN` globally instead.** It is a rustup-wide override — every `cargo` and `rustc`
+   invocation on the machine would move to the GNU toolchain, including unrelated projects. `build_mesa_msys2.sh`
+   already pins it internally for its own run (`export RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-stable-x86_64-pc-windows-gnu}`),
+   so only `build-unified.sh` ever needed it, and the direct path above covers that without the side effect.
+
+   The alternative, if you prefer to keep the proxy: export both `MESA_SWITCH_RUSTC=/c/Users/<you>/.cargo/bin/rustc.exe`
+   and `RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-gnu` in the shell you build from.
+
+   Both toolchains also need the cross target, or the build stops at the first Rust object:
+
+   ```sh
+   rustup target add aarch64-unknown-linux-gnu
+   rustup target add aarch64-unknown-linux-gnu --toolchain stable-x86_64-pc-windows-gnu
+   ```
+
+   Nothing else in the package list is required. `C:/msys64/clang64/bin/cmake.exe` is declared in the host cross file
+   but nothing in the Mesa build calls it, and `C:/msys64/clangarm64/bin/cbindgen.exe` is declared in the native file
+   but no `rust.cbindgen()` call exists in Mesa's `meson.build`, so Meson never resolves either. Switch portlibs are
+   not needed at all: `portlibs/switch/{include,lib}` are the *output* of this build
+   (`--prefix=/opt/devkitpro/portlibs/switch` plus `DESTDIR`), and the one portlib-shaped input, expat, is vendored as
+   `subprojects/expat.wrap` and built from source.
+
+`build-unified.sh` itself has still not been run: that needs a mesa-switch checkout with the patch applied, and there
+is none on this machine yet. Everything above is the cross files, the wrapper scripts, Mesa's own `meson.build` and the
+actual binaries checked against the filesystem — not a build log.
 
 ## Getting the same driver as the released NROs
 
@@ -61,8 +178,28 @@ program and library it cannot find.
    git apply ../cod2-nx/mesa/mesa-switch-cod2.patch
    ```
 
-3. Build it. The first time, use mesa-switch's own script, `build-unified.sh` (its README explains how). Later
-   rebuilds are quicker with `build_mesa_msys2.sh`, in this folder. The result is an SDK folder.
+   If it answers `patch does not apply` for every file at once, the patch arrived with Windows line endings
+   (`\r\n`) instead of Unix ones. `git apply` compares context lines byte by byte, so a trailing `\r` makes
+   every hunk miss, and the target checkout has LF. `.gitattributes` marks `*.patch` as `-text` so a
+   checkout no longer rewrites it; if yours was fetched before that line existed, convert it first:
+
+   ```sh
+   python -c "p='mesa-switch-cod2.patch'; d=open(p,'rb').read(); open(p,'wb').write(d.replace(b'\r\n', b'\n'))"
+   ```
+
+   A single `git apply` is all or nothing: it checks every hunk before writing any of them, so a failure
+   leaves the checkout untouched and there is nothing to undo.
+
+3. Build it. The first time, use mesa-switch's own script, `build-unified.sh`. **Set `ALLOW_DIRTY=1`**, or it refuses to
+   start: right after `git apply` the checkout is dirty, and the script exits 2 with "Refusing to create a release SDK
+   from a dirty checkout". (Committing the patch instead works too.)
+
+   ```sh
+   ALLOW_DIRTY=1 ./build-unified.sh
+   ```
+
+   Later rebuilds are quicker with `build_mesa_msys2.sh`, in this folder, which has no such check. The result is an SDK
+   folder.
 4. Tell the app where that SDK folder is when you configure it:
    `-DREXGLUE_SWITCH_NVK_SDK=<sdk>/opt/devkitpro/portlibs/switch`. The whole process is in
    [docs/building.md](../docs/building.md).

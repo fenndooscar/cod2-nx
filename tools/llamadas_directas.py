@@ -34,7 +34,11 @@ def enganchadas():
         if os.path.isfile(raiz):
             rutas = [raiz]
         else:
-            rutas = [os.path.join(d, f) for d, _, fs in os.walk(raiz) for f in fs
+            # app/src/aparcado holds the fork's hooks, which are not compiled (see its README): their
+            # addresses are not hooks of this build and must not stop the direct-call rewrite.
+            rutas = [os.path.join(d, f) for d, ds, fs in os.walk(raiz)
+                     if 'aparcado' not in ds
+                     for f in fs
                      if not f.endswith(('.a', '.obj', '.o', '.png', '.jpg', '.bin'))]
         for ruta in rutas:
             try:

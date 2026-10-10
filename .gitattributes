@@ -1,2 +1,9 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# A patch is applied byte by byte into another repository (mesa/mesa-switch-cod2.patch, with `git apply`),
+# and its context lines have to match that repository's files exactly. Normalising its line endings on
+# checkout breaks every hunk with "patch does not apply" - the target tree keeps LF and the patch arrives
+# with CRLF. Patches are not text to be normalised; they are an artifact.
+*.patch -text
+*.diff -text

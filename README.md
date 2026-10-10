@@ -1,8 +1,10 @@
 <div align=center>
 
-# Call of Duty 2 — Nintendo Switch port
+<img src="extras/banner.png" alt="Call of Duty 2" width="80%">
 
 </div>
+
+<h1 align=center>Call of Duty 2 — Nintendo Switch port</h1>
 
 A work-in-progress native Nintendo Switch port of the Xbox 360 version of **Call of Duty 2** (2005), built by static
 recompilation with [ReXGlue](https://github.com/rexglue/rexglue-sdk).
@@ -60,9 +62,10 @@ Done and verified on Windows (see [docs/building.md](docs/building.md)):
 - **Deleted the inherited PGO profiles** (1,328 `.gcda` files under `pgo/`). A GCC profile matches functions by a
   fingerprint of their name, and every recompiled function is named after its guest address, so the old profiles can
   never match this game. `pgo/` is empty on purpose.
-- **Neutralised the inherited address tables.** The entries in `app/overrides.toml` and all of `app/huecos.toml` are
-  the other game's addresses; `huecos.toml` is no longer included by the manifest and the `overrides.toml` entries are
-  commented out, with the explanations kept as a checklist of what to look for.
+- **Replaced the inherited address tables.** `app/huecos.toml` held 774 of the other game's addresses; it now holds
+  112 of this game's, regenerated with `tools/huecos.py` from CoD2's own generated code and checked with
+  `tools/comprobar_huecos.py`. The `app/overrides.toml` entries are still the other game's and are commented out,
+  with the explanations kept as a checklist of what to look for.
 - **Fixed the linker script.** `app/orden_funciones.ld` matches symbols by their mangled C++ name, and the rename
   changed the length prefix (`_ZN5cod2` → `_ZN4cod2`, `_ZN8Cod2App` → `_ZN7Cod2App`). 39 entries corrected. A wrong
   length does not fail the build — it silently stops matching — so this one is worth knowing about.
@@ -77,6 +80,22 @@ Done and verified on Windows (see [docs/building.md](docs/building.md)):
   rexglue` now succeeds with clang 23.1.3 and produces `sdk/out/win-amd64/rexglue.exe`.
 - **Kept the repository clean**: `.gitignore` now excludes the ~19,000 vendored files step 1 downloads, so only the
   seven files this port actually changes under `sdk/thirdparty/` are tracked.
+- **Made the code generator find the entry points only a pointer reaches.** CoD2's static initializer tables are
+  arrays of addresses in `.rdata` that are called through a register, so nothing in the code names them and branch
+  following cannot see them: the game died at the first one with `Call to invalid or unregistered function at guest
+  address 0x...`, and declaring that address only uncovered the next entry of the same table. The Discover phase now
+  scans `.rdata`/`.data` for aligned dwords that land inside a code region and treats each as a function
+  (`sdk/src/codegen/phase_discover.cpp`, `dataPointerScan`; turn it off with the `data_pointer_scan` cvar). 1,180
+  entry points, 21,000 functions analysed instead of 20,100.
+- **Let a call to a known function be emitted even when the graph has no edge for it.** Two functions can overlap —
+  one is discovered first and its blocks run into the other's code — and the calls of the overlapping body were then
+  emitted as `REX_FATAL` in the middle of a working function. `BuilderContext::emit_call_to_known_entry` emits the
+  call instead. Unresolved branches fell from 142 to 9, and the remaining 9 are three functions the analysis still
+  cannot place.
+- **Got Call of Duty 2 running on a PC.** With the two fixes above and `app/huecos.toml` regenerated from this game
+  (112 entries, all with bodies), the game starts, mounts the game root, brings up D3D12, SDL input and audio,
+  creates its threads, loads 35 MB of game data from `assets/game_root` and runs for about three minutes before it
+  dies with a fail-fast (`0xC0000409`) and no log line. It no longer dies on a codegen hole. See "Not done" 5.
 
 Not done, in the order they have to happen:
 
@@ -85,10 +104,15 @@ Not done, in the order they have to happen:
 3. **Run the code generator on `default.xex`** and read the import line in `app/codegen.log` first: it must report a
    non-zero number of resolved imports. CoD2's import table does not set the record-type byte the SDK currently looks
    at, so this is the first thing that can block everything.
-4. **Re-derive `app/overrides.toml` and `app/huecos.toml`** for CoD2's addresses (its `.text` ends at `0x82495E14`).
-5. **Get it running on a PC** with ReXGlue's own emulated GPU before touching the Switch.
+4. **Re-derive `app/overrides.toml`** for CoD2's addresses. `app/huecos.toml` is done: 112 entries, regenerated from
+   this game's own generated code with `tools/huecos.py` and checked with `tools/comprobar_huecos.py`.
+5. **Find the fail-fast that ends the PC run** (about three minutes in, `0xC0000409`, nothing in the log). The
+   nine unresolved branches left in `app/codegen.log` are the first suspects: they are `REX_FATAL` calls in the
+   generated code, and one of them firing would be a different error, so the fail-fast is elsewhere — but a wrong
+   function boundary in any of those three areas can corrupt anything downstream.
 6. **Replace the app's game-specific code** (`app/src/cod2_*.cpp`): the hooks, the D3D trace, the native renderer,
-   the audio server — all of it is still the other game's.
+   the audio server — all of it is still the other game's, and it is parked in `app/src/aparcado/` rather than
+   compiled.
 7. **Build the NVK driver** (`mesa/README.md`) and produce a first NRO.
 8. **Add a Bink path** over FFmpeg for the cutscenes, and the matching FFmpeg decoders
    (`sdk/thirdparty/FFmpeg/config_cod2_wmv3.h` is still a WMV3 configuration).
@@ -105,12 +129,20 @@ Everything below is needed for steps 1–6. Verified installed on the machine th
 | CMake 3.25+ | steps 4, 6 | installed (4.4.4) |
 | Ninja, Git, Python 3.10+ | steps 1–6 | installed |
 | **Clang 20+ on `PATH`** | step 4 (the code generator) | installed at `C:\Program Files\LLVM\bin` — **add it to `PATH` by hand**, the LLVM installer does not |
-| **MSYS2 with the MINGW64 toolchain, meson, ninja, pkg-config, python** | step 3 (the Mesa driver) | **not installed**: `C:\msys64` exists but has only the base packages |
-| **Rust with the `aarch64-unknown-linux-gnu` target** | step 3 (NVK's shader compiler is Rust) | Rust is installed, the cross target is **not** |
-| Vulkan SDK | step 7 (DXC, spirv-val) | installed (1.4.363.0); add `Bin` to `PATH` or set `VULKAN_SDK` |
-| MinGW g++ | step 7 | not installed |
-| Emscripten | rebuilding the browser tools | not installed (optional) |
+| MSYS2 with the CLANG64 host tools, meson, ninja, python, git | step 3 (the Mesa driver) | installed |
+| Rust with the `aarch64-unknown-linux-gnu` target | step 3 (NVK's shader compiler is Rust) | installed on both toolchains |
+| **devkitPro reachable at `C:/msys64/opt/devkitpro`** | step 3 (the Mesa cross file hardcodes that path) | done: `C:\msys64\opt\devkitpro` is a junction to `C:\devkitPro` |
+| `bindgen` on the CLANG64 `PATH` | step 3 (NVK's Rust reads C headers through it) | installed: `/clang64/bin/bindgen` |
+| no `clangarm64` packages | step 3 (ARM64 binaries cannot run on x86-64, and the wrapper picks them by executable bit) | clean: 0 packages, directory gone |
+| `SPIRV-Tools` + `LLVMSPIRVLib` | step 3 (the host pass builds `mesa_clc`, which makes both required) | installed: 2026.3.1 and 22.1.0.0 |
+| **`MESA_SWITCH_RUSTC`** pointing at the GNU toolchain's `rustc.exe` | step 3 (without it `build-unified.sh` exits 2, and the MSVC default cannot link Meson's Rust probe) | set it once as a Windows **user** env var — not a package |
+| Vulkan SDK | step 7 (DXC, spirv-val) | installed (1.4.363.0); `Bin` is on the machine `PATH`, so MSYS2 sees `dxc` and `spirv-val` too |
+| MinGW g++ and Emscripten | step 7, browser tools | both in MSYS2 **UCRT64** (`/ucrt64/bin/g++` = gcc 16.2.0, `/ucrt64/lib/emscripten/emcc` = 6.0.10). The shader script is a `.sh`, so run it from a UCRT64 shell, not from PowerShell |
 | Your own copy of Call of Duty 2 for Xbox 360 | everything | you must provide it |
+
+Everything needed for step 3 is installed. The one row in bold is not a package but a single environment variable, set
+once in Windows; [mesa/README.md](mesa/README.md) has the exact value and the list of what was actually run to check
+each row. Do **not** set `RUSTUP_TOOLCHAIN` globally — see that file for why.
 
 About 16 GB of RAM for the final optimization step. CoD2's `.text` is 4.0 MB against the other game's 13 MB, so this
 should be lighter, but it has not been measured yet.

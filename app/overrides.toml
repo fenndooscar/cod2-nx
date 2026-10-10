@@ -37,28 +37,31 @@
 #
 # Written and removed by tools/rendimiento.py. Do not edit by hand.
 
-# Condition registers as local variables instead of context fields,
-# so the compiler keeps them in real registers.
-cr_as_local = true
-
-# r14-r31 as local variables. Stack sampling showed ~14 % of the game's main thread in
-# __restgprlr_N / __savegprlr_N, the routines that save and restore those registers in every
-# prologue and epilogue. With this the codegen does not emit those calls and the compiler keeps
-# them in real registers. It benefits every game thread. The hooks that read r14-r31 from the
-# caller are handled below with share_registers (see [functions]). Verified: without this line
-# the codegen reproduces the previous code byte for byte (269 files unchanged).
-# The game uses setjmp (Lua, sub_826BF370), but its longjmp (sub_826BCF20) already returns to
-# its caller instead of to the setjmp: that path did not work even before this option.
-non_volatile_as_local = true
-
-# The carry/overflow register (XER, 172,403 uses in the game code: every comparison reads it)
-# and the count register (CTR, 32,637) as local variables. Every function uses both only
-# internally: none receives them from its caller. None of our hooks read them (verified: 0 uses
-# of ctx.xer / ctx.ctr in app/src).
-# non_argument_as_local is not enabled: it would localize r12, and __savevmx_N receives it as a base.
-# skip_lr is not enabled: our hooks read ctx.lr 21 times.
-xer_as_local = true
-ctr_as_local = true
+# ============================================================================
+#  THE FOUR "AS LOCAL" FLAGS ARE OFF FOR THE FIRST BOOT. Do not turn them on
+#  until Call of Duty 2 runs.
+#
+#  In the fork they were the single biggest codegen win: the condition registers
+#  (cr), XER, CTR and r14-r31 as local C++ variables instead of fields of the
+#  context, so the compiler keeps them in real registers.
+#
+#  They are also the change that fails *silently* and in the worst possible way:
+#  a function whose tail chunk was split off by the analyzer reads registers
+#  from its caller, and with the registers localized the tail receives zero.
+#  In the fork that hung the game at the video (sub_826E724C did bctrl with
+#  ctr = 0) and needed share_registers on 19 specific addresses -- addresses
+#  that belong to the other game and that we do not have for this one.
+#
+#  Measured, so that nobody "just tries it": enabling non_volatile_as_local
+#  without the matching share_registers list is a silent corruption, not a
+#  build error. Turn them on one at a time, starting with cr_as_local, and only
+#  after the game boots; tools/lee_antes.py finds the functions that read
+#  before writing (the ones that need share_registers).
+# ============================================================================
+# cr_as_local = true
+# non_volatile_as_local = true
+# xer_as_local = true
+# ctr_as_local = true
 
 # --- fin RENDIMIENTO raiz ---
 

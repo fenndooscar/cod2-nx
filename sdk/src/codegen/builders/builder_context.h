@@ -222,6 +222,16 @@ struct BuilderContext {
   const CallTarget* findCallTarget(uint32_t site) const;
 
   /**
+   * @brief Emit a call to a function the graph knows, when no CallTarget edge
+   *        exists for this site (overlapping functions).
+   * @param address Target function address
+   * @param copyBack Restore the caller's registers after the call (true for bl)
+   * @return false if the address is not a known function, so the caller can
+   *         emit its REX_FATAL instead
+   */
+  bool emit_call_to_known_entry(uint32_t address, bool copyBack);
+
+  /**
    * @brief Emit C++ code for a function call.
    * @param address Target function address
    *

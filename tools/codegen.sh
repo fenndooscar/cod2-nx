@@ -26,9 +26,17 @@ else
   "$PY" tools/llamadas_directas.py --gen "$APP/generated/default"
 fi
 echo "== literal copies"
-if [ -n "${3:-}" ]; then
-  "$PY" tools/copia_literal.py "$APP/generated/default" "$APP/src/copias_literales" --tabla "$RAIZ/$3"
+# Only for the native replacements that compare themselves against a copy of the original. Call of Duty 2
+# has none yet: tools/copia_literal.py holds Need for Speed: Most Wanted's addresses and fails on this
+# game's code by design ("the generated code does not match"). It runs again as soon as something under
+# app/src needs it, which is what the check below looks for.
+if grep -rqs 'copias_literales' "$APP/src" 2>/dev/null; then
+  if [ -n "${3:-}" ]; then
+    "$PY" tools/copia_literal.py "$APP/generated/default" "$APP/src/copias_literales" --tabla "$RAIZ/$3"
+  else
+    "$PY" tools/copia_literal.py "$APP/generated/default" "$APP/src/copias_literales"
+  fi
 else
-  "$PY" tools/copia_literal.py "$APP/generated/default" "$APP/src/copias_literales"
+  echo "   (no app source includes copias_literales; nothing to copy)"
 fi
 echo "done"

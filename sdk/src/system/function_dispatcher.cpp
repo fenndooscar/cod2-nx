@@ -35,8 +35,13 @@ FunctionDispatcher* GetBoundFunctionDispatcher() {
 }  // namespace
 
 static void InvalidFunctionTrap(PPCContext& ctx, uint8_t* /*base*/) {
-  REX_FATAL("Call to invalid or unregistered function at guest address 0x{:08X}",
-            ctx.last_indirect_target);
+  // lr holds the address right after the bctrl, so it names the call site. The
+  // codegen sets it before every indirect call, and it is the only thing that
+  // says WHERE the unknown entry point was called from - which is what decides
+  // whether the address is a jump table entry, a vtable slot or a data pointer
+  // the analysis missed. Without it the address alone is a needle in .text.
+  REX_FATAL("Call to invalid or unregistered function at guest address 0x{:08X} (from 0x{:08X})",
+            ctx.last_indirect_target, ctx.lr);
 }
 
 PPCFunc* ResolveIndirectFunction(uint32_t guest_address) {

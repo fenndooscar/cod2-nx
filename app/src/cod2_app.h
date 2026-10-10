@@ -1,6 +1,12 @@
-// cod2 - ReXGlue Recompiled Project
+// cod2 - the app itself: where the game data is, which settings are mandatory, and the hang watchdog.
 //
-// Customize your app by overriding virtual hooks from rex::ReXApp.
+// This is the *skeleton* app: it starts the recompiled game with ReXGlue's own emulated GPU and does
+// nothing else. It has no hooks, no native renderer, no audio rescue and no cutscene path, because none of
+// those exist for Call of Duty 2 yet. The inherited ones were parked in src/aparcado/ (see its README).
+//
+// The order of the work is in README.md, "Not done": first the game has to run on a PC with the emulated
+// GPU, because every translation problem is far easier to find there. Only then does it make sense to
+// replace any of it with native code.
 
 #pragma once
 
@@ -8,29 +14,20 @@
 #include <rex/filesystem.h>
 #include <rex/logging.h>
 #include <rex/rex_app.h>
-#include <rex/ui/overlay/debug_overlay.h>
-#include <rex/system/kernel_state.h>  // VIGILANTE DE CUELGUES
-#include <rex/system/xthread.h>       // VIGILANTE DE CUELGUES
+#include <rex/system/kernel_state.h>
+#include <rex/system/xthread.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
-#include <map>  // HANG WATCHDOG - the signature is sorted by thread id
+#include <map>
 #include <string>
 #include <thread>
 #include <vector>
 
-#if defined(COD2_NATIVE_SHADER_LIBRARY)
-#include "cod2_shader_hooks.h"
-#endif
-#include "cod2_ajustes_graficos.h"
-#include "cod2_entorno_mesa.h"
-#include "cod2_nativo_captura.h"
-#include "cod2_nativo_sistema.h"
 #include "cod2_perfil_pc.h"
-#include "cod2_prueba_entrada.h"
-#include "cod2_video_nativo.h"  // HANG WATCHDOG - cutscene frames with FFmpeg
+#include "cod2_pc_simbolos.h"
 
 class Cod2App : public rex::ReXApp {
  public:
@@ -38,97 +35,33 @@ class Cod2App : public rex::ReXApp {
 
   static std::unique_ptr<rex::ui::WindowedApp> Create(
       rex::ui::WindowedAppContext& ctx) {
-    return std::unique_ptr<Cod2App>(new Cod2App(ctx, "cod2",
-        PPCImageConfig));
+    return std::unique_ptr<Cod2App>(new Cod2App(ctx, "cod2", PPCImageConfig));
   }
-
-  // ==========================================================================
-  //  0. NATIVE RENDERER
-  //
-  //  With cod2_renderizador = "nativo" the graphics system is the app's own
-  //  (cod2_nativo_sistema.cpp) and the emulation plugin is not loaded:
-  //  ReXApp::SetupPresentation only loads it if config.graphics is empty.
-  //  The code default is still emulation. See docs/native-renderer.md.
-  // ==========================================================================
-  void OnPreSetup(rex::RuntimeConfig& config) override {
-    if (cod2::nativo::Activo()) {
-      config.graphics = cod2::nativo::CrearSistemaGrafico();
-    }
-    // Automated tests: virtual gamepad if cod2_prueba_botones has a script.
-    cod2::prueba::EnvolverEntrada(config);
-  }
-
-  // Available hooks, unused:
-  //   void OnLoadXexImage(std::string& xex_image) override {}
-  //   void OnPostLoadXexImage() override {}
-  //   void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {}
-  //   void OnShutdown() override {}
-  //
-  // The three below are used: portable paths, mandatory settings
-  // and the fps counter.
 
  protected:
   // ==========================================================================
-  //  1. PORTABLE PATHS: find the ISO next to the .exe
+  //  1. WHERE THE GAME DATA IS
   //
   //  Without this, starting without --game_data_root dies with
   //      "--game_data_root was not provided."
   //  because SetupEnvironment only looks at the cvar and, if it is empty,
   //  ConstructRuntime aborts.
   //
-  //  OnConfigurePaths is called right after the PathConfig is built and
-  //  before anyone uses it, so it is the place to fill the gap.
-  //
-  //  ORDER MATTERS: this runs before cod2.toml is loaded (the SDK
-  //  reads it a few lines further down, in SetupEnvironment). So the actual
-  //  priority is: --game_data_root from the command line, and otherwise
-  //  whatever is found right here. Setting game_data_root in the toml does
-  //  not work, and that is not our doing: it is how the SDK is ordered.
+  //  OnConfigurePaths runs right after the PathConfig is built and before
+  //  anyone uses it, which is the place to fill the gap. ORDER MATTERS: this
+  //  runs *before* cod2.toml is read (SetupEnvironment reads it a few lines
+  //  further down), so the priority is: --game_data_root on the command line,
+  //  and otherwise whatever is found here. Setting game_data_root in the toml
+  //  does not work, and that is not our doing: it is how the SDK is ordered.
   //
   //  It searches, in this order:
   //    1. an .iso whose name matches the executable's
   //    2. any other .iso in the folder, in alphabetical order
   //    3. a game_root\ folder, in case someone prefers to extract it
   //
-  //  (1) exists so that a folder with NFS_Most_Wanted.exe and
-  //  NFS_Most_Wanted.iso works unambiguously even if there are more images.
+  //  (1) exists so that a folder with cod2.exe and cod2.iso works
+  //  unambiguously even if there are more images.
   // ==========================================================================
-  // ==========================================================================
-  //  COPY OF THE SAVES, NEXT TO THE EXECUTABLE
-  //
-  //  The game's saves live where the runtime puts them, which is an opaque
-  //  place: <data>/<xuid>/<title>/<type>/<name>. The player cannot see them and
-  //  there is no convenient way to copy them or recover a corrupted one.
-  //
-  //  With content_backup_root, the runtime also leaves a copy sorted by
-  //  profile when each save is closed:
-  //      saves/<profile>/actual      the latest save
-  //      saves/<profile>/anterior    the previous one, in case the latest gets corrupted
-  //
-  //  On the Switch the NRO is in sdmc:/switch/cod2/, so this gives
-  //  sdmc:/switch/cod2/saves. On PC, next to the .exe, like everything else.
-  //
-  //  ORDER: this runs before cod2.toml is read, so the toml can
-  //  change the folder or leave it empty to copy nothing.
-  // ==========================================================================
-  void ElegirCarpetaDeGuardados() {
-    if (rex::cvar::GetFlagInfo("content_backup_root") == nullptr) {
-      return;  // SDK without that option: nothing happens
-    }
-    if (!rex::cvar::GetFlagByName("content_backup_root").empty()) {
-      return;  // given on the command line
-    }
-    const auto carpeta = rex::filesystem::GetExecutableFolder();
-    if (carpeta.empty()) {
-      return;
-    }
-    const auto destino = carpeta / "saves";
-    if (!rex::cvar::SetFlagByName("content_backup_root", rex::path_to_utf8(destino))) {
-      REXLOG_WARN("[guardado] no se pudo fijar la carpeta de copias en {}",
-                  rex::path_to_utf8(destino));
-    }
-  }
-
   void OnConfigurePaths(rex::PathConfig& paths) override {
     ElegirCarpetaDeGuardados();
     if (!paths.game_data_root.empty()) {
@@ -141,7 +74,6 @@ class Cod2App : public rex::ReXApp {
       return;
     }
 
-    // The executable's name, for the preferred case.
     std::filesystem::path preferida;
     std::vector<std::filesystem::path> otras;
 
@@ -181,57 +113,66 @@ class Cod2App : public rex::ReXApp {
       std::sort(otras.begin(), otras.end());
       paths.game_data_root = otras.front();
     } else {
-      // No ISO: an extracted folder next to it also works. The ISO patch
-      // left --game_data_root accepting both.
+      // No ISO: an extracted folder next to it also works.
       const auto extraida = carpeta / "game_root";
       if (std::filesystem::is_directory(extraida, ec)) {
         paths.game_data_root = extraida;
       }
     }
-    // If nothing is found, it is left empty on purpose: the SDK gives its
-    // own message, which is clearer than anything we could put here.
+    // If nothing is found it is left empty on purpose: the SDK gives its own
+    // message, which is clearer than anything we could put here.
   }
 
   // ==========================================================================
-  //  2. MANDATORY SETTINGS
+  //  2. COPY OF THE SAVES, NEXT TO THE EXECUTABLE
   //
-  //  So that plain "NFS_Most_Wanted.exe", without a single argument, starts
-  //  just as well as with the usual long command line.
+  //  The game's saves live where the runtime puts them, which is an opaque
+  //  place: <data>/<xuid>/<title>/<type>/<name>. The player cannot see them and
+  //  there is no convenient way to copy them or recover a corrupted one.
   //
-  //  Only the settings not set explicitly are touched: HasNonDefaultValue
-  //  tells "this is the factory default" from "someone asked for this". That
-  //  way the command line and cod2.toml still take precedence.
+  //  With content_backup_root the runtime also leaves a copy sorted by profile
+  //  when each save is closed:
+  //      saves/<profile>/actual      the latest save
+  //      saves/<profile>/anterior    the previous one, in case the latest gets corrupted
   //
-  //  WHY IN TWO DIFFERENT PLACES
-  //  The readback_resolve cvar does not exist yet when logging starts: it is
-  //  registered by the GPU plugin (rexgpu-xenos.dll), which is loaded later, in
-  //  SetupPresentation. Setting it earlier would mean writing to a flag that
-  //  does not exist yet. Hence:
+  //  On the Switch the NRO is in sdmc:/switch/cod2-nx/, so this gives
+  //  sdmc:/switch/cod2-nx/saves. On PC, next to the .exe, like everything else.
   //
-  //    OnPostInitLogging  -> gpu_plugin and mnk_mode, which belong to the runtime
-  //                          and are already registered. And it has to be here,
-  //                          because SetupPresentation reads gpu_plugin right after.
-  //    OnPostSetup        -> readback_resolve, once the plugin has loaded and
-  //                          before a single frame has been drawn.
+  //  ORDER: this runs before cod2.toml is read, so the toml can change the
+  //  folder or leave it empty to copy nothing.
+  // ==========================================================================
+  void ElegirCarpetaDeGuardados() {
+    if (rex::cvar::GetFlagInfo("content_backup_root") == nullptr) {
+      return;  // SDK without that option: nothing happens
+    }
+    if (!rex::cvar::GetFlagByName("content_backup_root").empty()) {
+      return;  // given on the command line
+    }
+    const auto carpeta = rex::filesystem::GetExecutableFolder();
+    if (carpeta.empty()) {
+      return;
+    }
+    const auto destino = carpeta / "saves";
+    if (!rex::cvar::SetFlagByName("content_backup_root", rex::path_to_utf8(destino))) {
+      REXLOG_WARN("[guardado] no se pudo fijar la carpeta de copias en {}",
+                  rex::path_to_utf8(destino));
+    }
+  }
+
+  // ==========================================================================
+  //  3. MANDATORY SETTINGS
+  //
+  //  So that a plain "cod2.exe", without a single argument, starts just as well
+  //  as with the usual long command line.
+  //
+  //  Only the settings not set explicitly are touched: HasNonDefaultValue tells
+  //  "this is the factory default" from "someone asked for this". That way the
+  //  command line and cod2.toml still take precedence.
   // ==========================================================================
   void OnPostInitLogging() override {
-    // Mesa/NVK environment variables (cod2_mesa_entorno): the toml has already been read and Vulkan is
-    // created later, in SetupPresentation.
-    cod2::entorno::AplicarEntornoMesa();
-    // Internal resolution and FPS limit that work with the native renderer: passed to the video mode before
-    // the game requests it, and the settings that do nothing are removed from the F4 menu.
-    cod2::ajustes::AplicarAjustesGraficos();
-    cod2::ajustes::OcultarAjustesSinEfecto();
-    // Optional post-processing (Graficos/Posproceso) and antialiasing: the output pass picks them up live.
-    cod2::ajustes::VigilarAjustesEnVivo();
     // Without a GPU plugin the screen stays black: the game runs, but the
     // runtime discards its graphics calls with "no GPU emulation loaded".
     PonerSiNadieLoPidio("gpu_plugin", "xenos");
-#if defined(COD2_NATIVE_SHADER_LIBRARY)
-    // VkDevice must be created with these capabilities; enabling them after
-    // SetupPresentation does not change a device that already exists.
-    PonerSiNadieLoPidio("vulkan_native_shader_features", "true");
-#endif
 #if !REX_PLATFORM_SWITCH
     // Keyboard and mouse in addition to the gamepad. The Switch has neither:
     // the synthetic device would only shadow the libnx controllers.
@@ -240,37 +181,17 @@ class Cod2App : public rex::ReXApp {
   }
 
   void OnPostSetup() override {
-#if defined(COD2_NATIVE_SHADER_LIBRARY)
-    cod2::native::IniciarBibliotecaShaders();
-#endif
-    // This is not a preference, it is a fix. The game computes its exposure
-    // by measuring the average brightness of the scene and reading that value
-    // back on the CPU. That readback is disabled by default ("none"), so the
-    // game receives garbage, concludes that the scene is extremely dark and
-    // raises the exposure to the maximum: washed-out image and a blown-out sun.
-    PonerSiNadieLoPidio("readback_resolve", "fast");
-
-    // FPS counter for the F3 overlay, see below.
-    SetGuestFrameStats([this] { return MuestreaFotograma(); });
-
-    // Hang watchdog, see below.
     ArrancarVigilante();
-
-    // PNG captures for the native renderer tests (cod2_captura_cada_s;
-    // off by default). It works the same with emulation, for comparison.
-    cod2::captura::Arrancar([this]() -> rex::ui::Presenter* {
-      const auto* rt = runtime();
-      const auto* grafico = rt ? rt->graphics_system() : nullptr;
-      return grafico ? grafico->presenter() : nullptr;
-    });
-
     // Sampling CPU profiler, PC only (cod2_perfil_pc_desde_s; off by default).
     cod2::perfil_pc::Arrancar();
+    // Host address of every recompiled function, PC only: without it a crash address inside the game's
+    // code cannot be turned back into the sub_XXXXXXXX the generated code speaks in
+    // (tools/pc/direccion.py).
+    cod2::pc_simbolos::Escribir();
   }
 
   void OnShutdown() override {
     cod2::perfil_pc::Parar();
-    cod2::captura::Parar();
     PararVigilante();
   }
 
@@ -289,86 +210,20 @@ class Cod2App : public rex::ReXApp {
   }
 
   // ==========================================================================
-  //  3. FPS COUNTER FOR THE F3 OVERLAY
-  //
-  //  In a Release build, F3 opens an empty box that only says "Debug". There
-  //  are two separate causes and both were closed doors:
-  //
-  //    1. Almost the whole panel lives inside #ifdef REXGLUE_ENABLE_PERF_COUNTERS,
-  //       and the SDK's CMakeLists says
-  //         add_compile_definitions($<$<NOT:$<CONFIG:Release>>:REXGLUE_ENABLE_PERF_COUNTERS>)
-  //       so in Release the define is not applied. That is on purpose:
-  //       "compiled out in Release", says its comment.
-  //
-  //    2. The "Guest: X FPS" line is not inside that #ifdef. It only needs
-  //       someone to register a provider with SetGuestFrameStats, and nothing in
-  //       the SDK calls it: it is an API the app has to use.
-  //
-  //  (2) is the door that can be opened without touching the SDK.
-  //
-  //  WHAT IT MEASURES: the game's frames, counted in the
-  //  Swap hook (g_cod2_fotogramas_juego, cod2_d3d_trace.cpp). An earlier
-  //  version measured how often the overlay drew, and with a menu open the UI
-  //  thread repaints nonstop: it showed ~60 FPS with the game at 4 or stopped.
-  //
-  //  The provider is called by the overlay's OnDraw on every repaint. It is
-  //  recomputed at most once per second from the frames of that window, and
-  //  smoothed a little (averaged with the previous window) so it is readable.
-  // ==========================================================================
-  rex::ui::FrameStats MuestreaFotograma() {
-    extern std::atomic<uint64_t> g_cod2_fotogramas_juego;
-    using Reloj = std::chrono::steady_clock;
-    const auto ahora = Reloj::now();
-    const uint64_t total = g_cod2_fotogramas_juego.load(std::memory_order_relaxed);
-    stats_.frame_count = total > 0 ? total : 1;  // the overlay does not draw if this is 0
-
-    if (!tiene_anterior_) {
-      tiene_anterior_ = true;
-      ultimo_ = ahora;
-      fotogramas_ = total;
-      return stats_;
-    }
-    const double dt_ms =
-        std::chrono::duration<double, std::milli>(ahora - ultimo_).count();
-    if (dt_ms < 1000.0) {
-      return stats_;
-    }
-    const uint64_t hechos = total - fotogramas_;
-    ultimo_ = ahora;
-    fotogramas_ = total;
-
-    if (hechos == 0) {
-      // The game has not presented anything in the whole window.
-      suave_ms_ = 0.0;
-      stats_.fps = 0.0;
-      stats_.frame_time_ms = dt_ms;
-      return stats_;
-    }
-    const double ms_por_fotograma = dt_ms / double(hechos);
-    // After a long time with the overlay closed, the previous window is useless.
-    suave_ms_ = (suave_ms_ <= 0.0 || dt_ms > 5000.0) ? ms_por_fotograma
-                                                     : (suave_ms_ + ms_por_fotograma) * 0.5;
-    stats_.frame_time_ms = suave_ms_;
-    stats_.fps = 1000.0 / suave_ms_;
-    return stats_;
-  }
-
-  // ==========================================================================
   //  4. HANG WATCHDOG
   //
   //  THE PROBLEM IT SOLVES
-  //  When returning to the menu the game freezes, and absolutely nothing
-  //  shows up in the log: no error, no kernel call, no graphics command.
-  //  Total silence until the window is closed. That rules out an exception
-  //  or an unregistered function (those are visible) and leaves a single
-  //  explanation: all the game's threads are stopped at once, waiting for
-  //  something that never arrives.
+  //  When the game freezes, absolutely nothing shows up in the log: no error,
+  //  no kernel call, no graphics command. Total silence. That rules out an
+  //  exception or an unregistered function (those are visible) and leaves a
+  //  single explanation: all the game's threads are stopped at once, waiting
+  //  for something that never arrives.
   //
-  //  And a deadlock cannot be diagnosed from the log, because what defines
-  //  it is precisely that nothing gets written anymore. The threads have to
-  //  be asked directly.
+  //  And a deadlock cannot be diagnosed from the log, because what defines it
+  //  is precisely that nothing gets written anymore. The threads have to be
+  //  asked directly.
   //
-  //  HOW IT WORKS, AND WHY IT NEEDS NO NOTIFICATION
+  //  HOW IT WORKS
   //  A separate thread looks at all guest threads once per second and records
   //  two registers of each one:
   //
@@ -376,23 +231,14 @@ class Cod2App : public rex::ReXApp {
   //        in code that makes progress.
   //    r1  the stack pointer. Same.
   //
-  //  If for several seconds in a row no thread has moved either of the two,
-  //  the game is not slow: it is stopped. Then the table is dumped.
-  //
-  //  The advantage of measuring it this way is that it depends on nothing:
-  //  not on the frame counter (which only runs with the overlay open), not on
-  //  the game calling the kernel, not on the graphics thread staying alive.
-  //  If everything stops, it shows precisely because everything stops.
+  //  If for several seconds in a row no thread has moved either of the two, the
+  //  game is not slow: it is stopped. Then the table is dumped.
   //
   //  WHAT THE DUMP GIVES
   //  For each thread: its entry address (which tells which thread it is), lr,
   //  r1 and r13. With that, a thread that waits (lr stuck in a kernel wait
-  //  function) can be told apart from one that spins (lr jumping between two
-  //  or three addresses). And since it is dumped every 15 seconds while it
-  //  lasts, it shows whether something moves very slowly or not at all.
-  //
-  //  COST WHEN NOTHING HAPPENS
-  //  One pass per second reading two integers per thread. Negligible.
+  //  function) can be told apart from one that spins (lr jumping between two or
+  //  three addresses).
   //
   //  It lives in the app and not in the SDK on purpose: that way it can be
   //  changed without rebuilding the whole SDK, and it does not impose a
@@ -411,8 +257,6 @@ class Cod2App : public rex::ReXApp {
     }
   }
 
-  // Dump of the thread table. 'grave' decides whether it goes out as an error (when
-  // it is a real alarm) or as debug (the routine snapshots).
   template <typename Lista>
   static void VolcarHilos(const Lista& hilos, bool grave) {
     for (auto& h : hilos) {
@@ -443,11 +287,9 @@ class Cod2App : public rex::ReXApp {
   }
 
   void VigilanteMain() {
-    using Reloj = std::chrono::steady_clock;
-
     // How many seconds in a row without anything moving before raising the
-    // alarm. Five is generous: this game at 10 fps still moves registers
-    // a hundred times per second, so five still seconds are not slowness.
+    // alarm. Five is generous: a game at 10 fps still moves registers a hundred
+    // times per second, so five still seconds are not slowness.
     constexpr int kSegundosParaSospechar = 5;
     constexpr int kSegundosEntreVolcados = 15;
 
@@ -468,20 +310,15 @@ class Cod2App : public rex::ReXApp {
       auto hilos = kernel->object_table()->GetObjectsByType<rex::system::XThread>();
       if (hilos.empty()) continue;
 
-      // A signature of "where everyone is". It does not need to be a
-      // good hash: it only has to change if some register changes.
+      // A signature of "where everyone is". It does not need to be a good hash:
+      // it only has to change if some register changes.
       //
-      // Watch the order. The first version of this multiplied and mixed
-      // on the fly, walking the list as it came. And GetObjectsByType does
-      // not guarantee the order: in the real dumps the threads came out
-      // shuffled from one round to the next, and even repeated (0x6 appeared
-      // twice). So the signature changed on its own even when nothing moved,
-      // and the alarm never fired in the real hang. The only thing that
-      // helped at all was the periodic snapshots further down.
-      //
-      // The fix is to put each thread in a map keyed by its id: the map sorts
-      // itself, so the shuffling no longer matters, and a repeated id
-      // overwrites instead of being counted twice. Only then is it mixed.
+      // Watch the order. GetObjectsByType does not guarantee it: in the real
+      // dumps the threads came out shuffled from one round to the next, and
+      // even repeated. So the signature changed on its own even when nothing
+      // moved, and the alarm never fired. Putting each thread in a map keyed by
+      // its id fixes it: the map sorts itself and a repeated id overwrites
+      // instead of being counted twice.
       std::map<uint32_t, uint64_t> por_hilo;
       for (auto& h : hilos) {
         auto* estado = h->thread_state();
@@ -497,31 +334,19 @@ class Cod2App : public rex::ReXApp {
         firma = (firma ^ id_hilo) * 1099511628211ull;
         firma = (firma ^ huella) * 1099511628211ull;
       }
-      // Cutscenes with FFmpeg (cod2_video_nativo.cpp): the video player threads wait almost all the time
-      // in the same place and the signature may not change even though the video advances. On PC the alarm
-      // fired during attract_movie with the video at 30 frames/s and the audio without gaps.
-      firma = (firma ^ cod2::video_nativo::FotogramasNativos()) * 1099511628211ull;
-      // Native renderer swaps. With the blocking waits (cod2_espera_anillo.cpp and
-      // cod2_espera_fotograma.cpp) the main thread and the D3D thread sleep almost the whole frame in the
-      // same place, and the signature may not change even though the game keeps drawing: the alarm fired
-      // in the menus of a PC race test with the PM4 ring thread drawing (118,332 draws in those 10 s).
-      firma = (firma ^ cod2::nativo::SwapsNativos()) * 1099511628211ull;
 
       // PERIODIC SNAPSHOT, WHATEVER HAPPENS.
       //
-      // The alarm above only fires if nothing moves, and it turned out that
-      // the hang being chased is not of that kind: the registers kept
-      // changing, meaning the game runs code but makes no progress. A tight
-      // loop waiting for something that never arrives looks just as stuck
-      // from outside, and yet the alarm does not catch it.
+      // The alarm above only fires if nothing moves, and the hangs chased in
+      // the fork's game were not of that kind: the registers kept changing,
+      // meaning the game runs code but makes no progress. A tight loop waiting
+      // for something that never arrives looks just as stuck from outside, and
+      // yet the alarm does not catch it.
       //
-      // That is what this is for: every ten seconds it records where each
-      // thread is, whether there is a problem or not. When the game freezes,
-      // two or three snapshots of the bad stretch remain, and if lr cycles
-      // between the same two or three addresses, there is the loop.
-      //
-      // It logs at debug level (no noise in normal use) and it is a few
-      // lines every ten seconds.
+      // So every ten seconds it records where each thread is, whether there is
+      // a problem or not. When the game freezes, two or three snapshots of the
+      // bad stretch remain, and if lr cycles between the same two or three
+      // addresses, there is the loop. Debug level: no noise in normal use.
       if (++desde_instantanea >= 10) {
         desde_instantanea = 0;
         REXLOG_DEBUG("[vigilante] instantanea: {} hilos del juego", hilos.size());
@@ -549,8 +374,9 @@ class Cod2App : public rex::ReXApp {
                    "del juego. Esto no es lentitud: esta parado.",
                    quietos, hilos.size());
       VolcarHilos(hilos, true);
-      // And the stacks of every thread in the process, host ones included (ring, audio, copies): on PC it
-      // writes logs/pilas_N.txt (cod2_perfil_pc.cpp). Only on the first two alarms.
+      // And the stacks of every thread in the process, host ones included: on
+      // PC it writes logs/pilas_N.txt (cod2_perfil_pc.cpp). Only on the first
+      // two alarms.
       if (volcados_pilas < 2) {
         ++volcados_pilas;
         cod2::perfil_pc::VolcarPilas("vigilante");
@@ -558,12 +384,6 @@ class Cod2App : public rex::ReXApp {
       avisado = true;
     }
   }
-
-  rex::ui::FrameStats stats_{};
-  std::chrono::steady_clock::time_point ultimo_{};
-  double suave_ms_ = 0.0;
-  uint64_t fotogramas_ = 0;
-  bool tiene_anterior_ = false;
 
   std::thread vigilante_;
   std::atomic<bool> vigilante_activo_{false};

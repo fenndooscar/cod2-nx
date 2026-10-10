@@ -172,6 +172,33 @@ const CallTarget* BuilderContext::findCallTarget(uint32_t site) const {
   return nullptr;
 }
 
+bool BuilderContext::emit_call_to_known_entry(uint32_t address, bool copyBack) {
+  // Fallback for a call the graph knows the target of but never recorded an
+  // edge for. Two functions can overlap: one is discovered first and its blocks
+  // run into the other's code, because the second was not an entry point yet.
+  // The overlapping body is then emitted as part of the first function, and its
+  // calls are resolved against the first function's edge list, which does not
+  // have them. Call of Duty 2 hits this (0x822909B0 runs into 0x82290A10), and
+  // the result was a REX_FATAL in the middle of a working function.
+  //
+  // The target is a function with a name and a body, so the call can simply be
+  // emitted: refusing to is turning information the analysis already has into a
+  // crash. Anything else - a target that is not an entry point - is a real
+  // unknown and keeps its REX_FATAL.
+  auto* targetFn = graph().getFunction(address);
+  if (!targetFn) {
+    return false;
+  }
+
+  emitCtx.reference(targetFn->name());
+  if (targetFn->sharesRegisters() && localizesAnything()) {
+    emit_call_sharing_registers(fmt::format("{}(ctx, base);", targetFn->name()), copyBack, "\t");
+  } else {
+    println("\t{}(ctx, base);", targetFn->name());
+  }
+  return true;
+}
+
 void BuilderContext::emit_function_call(uint32_t address) {
   const auto& cfg = config();
 
@@ -267,7 +294,12 @@ void BuilderContext::emit_function_call(uint32_t address) {
     return;
   }
 
-  // No pre-resolved target found - this is an error
+  // No pre-resolved target found. If the graph still has the function, emit the
+  // call; only a genuinely unknown address is an error.
+  if (emit_call_to_known_entry(address, true)) {
+    return;
+  }
+
   REXCODEGEN_ERROR("Unresolved function 0x{:08X} from 0x{:08X} (no CallTarget in FunctionNode)",
                    address, base);
   println("\t// FATAL: unresolved function 0x{:08X} (no CallTarget in FunctionNode)", address);
@@ -366,6 +398,13 @@ void BuilderContext::emit_conditional_branch(bool not_, std::string_view cond) {
           println("\t\treturn;");
           println("\t}}");
         }
+      } else if (graph().getFunction(target)) {
+        // Same overlap case as in emit_function_call: the target is a function,
+        // the edge for this site was just never recorded on this node.
+        println("\tif ({}{}.{}) {{", not_ ? "!" : "", cr(insn.operands[0]), cond);
+        emit_call_to_known_entry(target, false);
+        println("\t\treturn;");
+        println("\t}}");
       } else {
         REXCODEGEN_ERROR("Unresolved conditional branch to 0x{:08X} from 0x{:08X} (no CallTarget)",
                          target, base);
@@ -375,6 +414,15 @@ void BuilderContext::emit_conditional_branch(bool not_, std::string_view cond) {
       break;
 
     case TargetKind::Unknown:
+      // Unknown to the graph, but this function has the label: the two
+      // disagree because the function is one of several overlapping ones, and
+      // classifyTarget asked the innermost of them. The label is emitted in
+      // this body, so the goto is right by construction.
+      if (fn.labels().count(target)) {
+        println("\tif ({}{}.{}) goto loc_{:08X};", not_ ? "!" : "", cr(insn.operands[0]), cond,
+                target);
+        break;
+      }
       REXCODEGEN_ERROR("Unresolved conditional branch to 0x{:08X} from 0x{:08X}", target, base);
       println("\t// ERROR: conditional branch to unknown address 0x{:08X}", target);
       println("\tif ({}{}.{}) REX_FATAL(\"Unresolved branch from 0x{:08X} to 0x{:08X}\");",

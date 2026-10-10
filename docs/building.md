@@ -111,6 +111,22 @@ This does three things:
    functions. The [guards](glossary.md#guard) of their native replacements compare against them (see
    [native-renderer.md](native-renderer.md)).
 
+Then check the declarations, before building anything:
+
+```sh
+python tools/comprobar_huecos.py
+```
+
+Every address declared in `app/huecos.toml` has to have got a body in the generated C++. A declaration without one is
+not a code generator error: it is registered in the function table anyway and surfaces much later, at link time, as
+`lld-link: error: undefined symbol: sub_XXXXXXXX`, with nothing pointing at the TOML. The command exits 1 and names
+the reason. The two reasons are a data block embedded in `.text` and an import thunk; both are handled by
+`tools/huecos_excluir.txt`.
+
+If a run dies with `Call to invalid or unregistered function at guest address 0x...`, that address is an entry point
+the analysis never found. Add it to `app/huecos.toml` as a bare `"0xADDR" = { }` line and regenerate; `tools/huecos.py
+--comprobar 0xADDR` says whether the address is a function start and which gap it falls in.
+
 ## 6. Build the NRO
 
 From PowerShell:

@@ -33,3 +33,6 @@ REXCVAR_DECLARE(uint32_t, max_seh_scope_entries);
 REXCVAR_DECLARE(uint32_t, backward_scan_limit);
 REXCVAR_DECLARE(uint32_t, max_jump_table_entries);
 REXCVAR_DECLARE(uint32_t, max_blocks_per_function);
+
+// Codegen/Discovery - opt-in or opt-out switches for the analysis
+REXCVAR_DECLARE(bool, data_pointer_scan);

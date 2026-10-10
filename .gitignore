@@ -19,6 +19,12 @@ app*/src/copias_literales/
 app*/src/cod2_nativo_resplandor_*_spirv.h
 app_*/
 
+# Reports about the game's own code. They are lists of addresses in default.xex, so
+# they are derived from it, and tools/huecos.py rewrites them on every run.
+docs/huecos.txt
+docs/punteros.txt
+tools/huecos_functions.toml
+
 # --- Build output -------------------------------------------------------------
 out/
 build/
@@ -56,3 +62,5 @@ __pycache__/
 *.pyc
 .vs/
 .vscode/
+graphify-out/
+mesa/mesa-switch

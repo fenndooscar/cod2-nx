@@ -35,6 +35,9 @@ namespace rex::codegen {
 
 namespace {
 
+// Defined below, next to functionPointerScan; called from discoverAllFunctions.
+void dataPointerScan(CodegenContext& ctx);
+
 //=============================================================================
 // Discover Phase: iterative function block discovery
 //=============================================================================
@@ -265,6 +268,36 @@ void discoverAllFunctions(CodegenContext& ctx) {
   }
 
   REXCODEGEN_TRACE("Analyze: {} total functions after vtable scan", graph.functionCount());
+
+  // Entry points that only a data pointer reaches. This runs after the call
+  // graph and the vtable scan have settled, so the pointers that name a
+  // function already known are skipped and only the missed ones are added.
+  // Their blocks are discovered in the same pass, which is why this belongs
+  // here and not in analyze.cpp next to the disabled functionPointerScan.
+  {
+    size_t before = graph.functionCount();
+    if (REXCVAR_GET(data_pointer_scan)) {
+      dataPointerScan(ctx);
+    }
+    if (graph.functionCount() != before) {
+      size_t iteration = 0;
+      const size_t maxIterations = REXCVAR_GET(max_vtable_iterations);
+      while (iteration < maxIterations) {
+        iteration++;
+        auto knownFunctions = buildKnownFunctions(graph);
+        if (discoverPendingFunctions(ctx, knownFunctions) == 0) {
+          break;
+        }
+        if (graph.functionCount() == lastFunctionCount) {
+          break;
+        }
+        lastFunctionCount = graph.functionCount();
+      }
+    }
+  }
+
+  REXCODEGEN_TRACE("Analyze: {} total functions after data pointer scan",
+                   graph.functionCount());
 }
 
 //=============================================================================
@@ -400,6 +433,96 @@ void functionPointerScan(CodegenContext& ctx) {
   }
 
   REXCODEGEN_TRACE("functionPointerScan: found {} new function pointer targets", foundCount);
+}
+
+//=============================================================================
+// Data Pointer Scan: find function entry points that only a pointer reaches
+//
+// The scan above only looks at code, and only at lis/addi pairs. It therefore
+// misses the way Call of Duty 2 (and every MSVC-built 360 title) stores its
+// initializer tables: a plain array of addresses in .rdata, walked at startup
+// and each entry called through a register. Nothing in the code names those
+// functions, so no amount of branch following finds them, and the game dies at
+// the first one with
+//
+//     [FATAL] Call to invalid or unregistered function at guest address 0x...
+//
+// This is what made that crash appear to move: each declared address uncovered
+// the next entry of the same table.
+//
+// A dword in a data section that lands inside a code region is a function entry
+// point, by construction - there is nothing else it can be. The only judgement
+// call is which sections count, and the answer is the non-executable ones that
+// the linker fills with addresses: .rdata and .data.
+//=============================================================================
+void dataPointerScan(CodegenContext& ctx) {
+  auto& graph = ctx.graph;
+  const auto& binary = ctx.binary();
+
+  std::unordered_set<uint32_t> existingFunctions;
+  for (const auto& [addr, node] : graph.functions()) {
+    existingFunctions.insert(addr);
+  }
+
+  // Code ranges, so a pointer can be recognised without asking the graph.
+  std::vector<std::pair<uint32_t, uint32_t>> codeRanges;
+  for (const auto& region : ctx.decoded().codeRegions()) {
+    codeRanges.emplace_back(region.start, region.end);
+  }
+  if (codeRanges.empty()) {
+    REXCODEGEN_WARN("dataPointerScan: no code regions, skipping");
+    return;
+  }
+  auto inCode = [&codeRanges](uint32_t addr) {
+    for (const auto& [start, end] : codeRanges) {
+      if (addr >= start && addr < end) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  size_t foundCount = 0;
+  for (const auto& section : binary.sections()) {
+    if (section.executable || !section.data) {
+      continue;
+    }
+    if (section.name != ".rdata" && section.name != ".data") {
+      continue;
+    }
+
+    for (uint32_t offset = 0; offset + 4 <= section.size; offset += 4) {
+      // Addresses are stored big-endian, like every other 32-bit value here.
+      uint32_t value = load_and_swap<uint32_t>(section.data + offset);
+      // A function entry point is always 4-byte aligned. Without this the scan
+      // picks up unrelated integers that happen to fall in a code range, and
+      // each one starts a bogus block decode that runs off into data - which
+      // shows up later as an unresolved call to an address no instruction can
+      // produce.
+      if ((value & 3) != 0) {
+        continue;
+      }
+      if (!inCode(value) || existingFunctions.contains(value)) {
+        continue;
+      }
+      // The import thunk and export tables live at the end of .text and are not
+      // code: a pointer to one is a pointer to a jump table entry, not to a
+      // function that needs recompiling.
+      if (binary.isInImportExportRange(value)) {
+        continue;
+      }
+      graph.addFunction(value, 4, FunctionAuthority::DISCOVERED, true);
+      existingFunctions.insert(value);
+      foundCount++;
+      REXCODEGEN_TRACE("dataPointerScan: found 0x{:08X} via pointer at 0x{:08X}", value,
+                       section.baseAddress + offset);
+    }
+  }
+
+  REXCODEGEN_TRACE("dataPointerScan: found {} new function pointer targets", foundCount);
+  if (foundCount) {
+    REXCODEGEN_INFO("dataPointerScan: {} function entry points found in .rdata/.data", foundCount);
+  }
 }
 
 }  // anonymous namespace
