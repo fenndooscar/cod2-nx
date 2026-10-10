@@ -454,15 +454,56 @@ void functionPointerScan(CodegenContext& ctx) {
 // point, by construction - there is nothing else it can be. The only judgement
 // call is which sections count, and the answer is the non-executable ones that
 // the linker fills with addresses: .rdata and .data.
+//
+// The one thing that breaks "by construction" is a label of a function that is
+// already discovered. The compiler also stores those in .rdata, and they are not
+// entry points at all: three consecutive dwords at 0x82068A14 name 0x8229AF54,
+// 0x8229AF00 and 0x8229AFB4, which are three branch targets inside the loop of
+// sub_8229AED0. Declaring them as functions starts a second decode in the middle
+// of a working one, and the real function's own backward branch then names an
+// address that belongs to the other function:
+//
+//     Unresolved function 0x8229AF10 from 0x8229AFC8 (no CallTarget in FunctionNode)
+//
+// which is emitted as REX_FATAL in the middle of the loop instead of the loop.
+// That was the whole of the nine unresolved branches this scan left behind.
 //=============================================================================
 void dataPointerScan(CodegenContext& ctx) {
   auto& graph = ctx.graph;
   const auto& binary = ctx.binary();
 
   std::unordered_set<uint32_t> existingFunctions;
+  // The code every function already discovered owns, as [start, end) intervals.
+  // A candidate inside one of them is not an entry point: it is code the
+  // function already has, and declaring it starts a second decode in the middle
+  // of a working one. This is containsAddress()'s rule, precomputed because the
+  // scan tests ~1200 candidates against ~21000 functions.
+  //
+  // It is not enough to test labels(): 0x8229AF00 is the instruction after a bl
+  // inside sub_8229AED0, so it starts a block but is nobody's branch target and
+  // never reaches the label set. 0x8229AFB4, two instructions of the same loop,
+  // is a beq target and does. Both are fragments of the same function.
+  std::vector<std::pair<uint32_t, uint32_t>> ownedRanges;
   for (const auto& [addr, node] : graph.functions()) {
     existingFunctions.insert(addr);
+    for (const auto& block : node->blocks()) {
+      ownedRanges.emplace_back(block.base, block.end());
+    }
+    // CONFIG and PDATA functions declare a size their blocks need not cover
+    // (out-of-line switch cases); containsAddress() trusts it, so this must too.
+    if (node->authority() == FunctionAuthority::CONFIG ||
+        node->authority() == FunctionAuthority::PDATA) {
+      ownedRanges.emplace_back(node->base(), node->end());
+    }
   }
+  std::sort(ownedRanges.begin(), ownedRanges.end());
+  auto ownedByAFunction = [&ownedRanges](uint32_t addr) {
+    auto it = std::upper_bound(ownedRanges.begin(), ownedRanges.end(), addr,
+                               [](uint32_t a, const std::pair<uint32_t, uint32_t>& b) {
+                                 return a < b.first;
+                               });
+    return it != ownedRanges.begin() && addr < std::prev(it)->second;
+  };
 
   // Code ranges, so a pointer can be recognised without asking the graph.
   std::vector<std::pair<uint32_t, uint32_t>> codeRanges;
@@ -503,6 +544,14 @@ void dataPointerScan(CodegenContext& ctx) {
         continue;
       }
       if (!inCode(value) || existingFunctions.contains(value)) {
+        continue;
+      }
+      // Code a function already discovered owns is not a new entry point. See
+      // the note above.
+      if (ownedByAFunction(value)) {
+        REXCODEGEN_TRACE("dataPointerScan: 0x{:08X} (pointer at 0x{:08X}) is inside an "
+                         "existing function, skipping",
+                         value, section.baseAddress + offset);
         continue;
       }
       // The import thunk and export tables live at the end of .text and are not

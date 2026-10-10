@@ -31,7 +31,19 @@
 #      rexglue codegen cod2_manifest.toml > codegen.log
 #      python tools/huecos.py --log app/codegen.log --toml app/huecos.toml
 #
-#  until the log stops saying "Unresolved". 112 entries, gaps of 8 bytes and up.
+#  until the log stops saying "Unresolved". 111 entries, gaps of 8 bytes and up.
+#
+#  One entry was removed by hand and must not come back: `"0x822B3A40" = { end =
+#  0x822B3B3C }`. The loop above added it because the log said "Unresolved b
+#  target 0x822B3A40 from 0x822B3A10", and declaring the address made that
+#  branch resolve - at the price of a second function decoded inside
+#  sub_822B3960, whose own backward branches then landed outside it and became
+#  REX_FATAL in the middle of a working loop. 0x822B3A40 is that function's
+#  epilogue, not an entry point; the root cause was in the analysis, not here
+#  (dataPointerScan in sdk/src/codegen/phase_discover.cpp now skips an address
+#  that falls inside a function already discovered). With it fixed the branch
+#  resolves to loc_822B3A40 inside sub_822B3960 and the log is clean, so a
+#  regeneration of this file will not put the entry back.
 # ============================================================================
 
 [functions]
@@ -147,4 +159,3 @@
 "0x82485418" = { }   # 376 bytes
 "0x82485608" = { }   # 672 bytes
 "0x8249DA50" = { }   # 7984 bytes
-"0x822B3A40" = { end = 0x822B3B3C }   # cola de la funcion anterior

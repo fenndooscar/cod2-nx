@@ -87,8 +87,16 @@ Done and verified on Windows (see [docs/building.md](docs/building.md)):
   following cannot see them: the game died at the first one with `Call to invalid or unregistered function at guest
   address 0x...`, and declaring that address only uncovered the next entry of the same table. The Discover phase now
   scans `.rdata`/`.data` for aligned dwords that land inside a code region and treats each as a function
-  (`sdk/src/codegen/phase_discover.cpp`, `dataPointerScan`; turn it off with the `data_pointer_scan` cvar). 1,180
-  entry points, 21,000 functions analysed instead of 20,100.
+  (`sdk/src/codegen/phase_discover.cpp`, `dataPointerScan`; turn it off with the `data_pointer_scan` cvar). 1,031
+  entry points, 21,301 functions analysed instead of 20,122.
+- **Stopped that scan from inventing functions inside functions.** The scan takes any aligned dword in
+  `.rdata`/`.data` that lands in a code region as an entry point, but the compiler also stores *internal branch
+  targets* there, and three consecutive dwords at `0x82068A14` name three labels of one loop. Declaring them
+  started a second decode inside a working function, and that function's own backward branches then landed
+  outside it and were emitted as `REX_FATAL` in the middle of the loop. The scan now skips a candidate that
+  falls inside the blocks of a function already discovered (1,179 → 1,031 entry points), and one hand-added
+  entry in `app/huecos.toml` that papered over the same thing was removed. **`app/codegen.log` now reports
+  zero unresolved branches**, down from nine.
 - **Let a call to a known function be emitted even when the graph has no edge for it.** Two functions can overlap —
   one is discovered first and its blocks run into the other's code — and the calls of the overlapping body were then
   emitted as `REX_FATAL` in the middle of a working function. `BuilderContext::emit_call_to_known_entry` emits the
@@ -150,14 +158,12 @@ Not done, in the order they have to happen:
 3. **Run the code generator on `default.xex`** and read the import line in `app/codegen.log` first: it must report a
    non-zero number of resolved imports. CoD2's import table does not set the record-type byte the SDK currently looks
    at, so this is the first thing that can block everything.
-4. **Re-derive `app/overrides.toml`** for CoD2's addresses. `app/huecos.toml` is done: 112 entries, regenerated from
+4. **Re-derive `app/overrides.toml`** for CoD2's addresses. `app/huecos.toml` is done: 111 entries, regenerated from
    this game's own generated code with `tools/huecos.py` and checked with `tools/comprobar_huecos.py`.
 5. **Find out what the game is drawing.** The process now stays up and presents frames, but consecutive frames differ
    in every pixel (a mean of 53–75 per channel over 3.1 M of 3.69 M pixels) and no legible text has been found in any
    capture, so it is not a menu and not normal gameplay. Either the game is still early in its startup sequence and
-   the picture is a loading state, or the presenter path is handing over the wrong surface or format. The nine
-   unresolved branches left in `app/codegen.log` are worth clearing first: they are `REX_FATAL` calls in the
-   generated code, and a wrong function boundary in any of those three areas can corrupt anything downstream.
+   the picture is a loading state, or the presenter path is handing over the wrong surface or format.
 6. **Replace the app's game-specific code** (`app/src/cod2_*.cpp`): the hooks, the D3D trace, the native renderer,
    the audio server — all of it is still the other game's, and it is parked in `app/src/aparcado/` rather than
    compiled.
