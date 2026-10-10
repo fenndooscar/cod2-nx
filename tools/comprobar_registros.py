@@ -19,6 +19,10 @@ Three shapes are skipped because all three are correct code and all three write 
     bodies when it is too large, and only the first carries the prologue; the rest use the registers the
     first one saved. A body with no `mflr`, no `stwu` and no `__savegprlr_` is such a fragment.
     `sub_82299DE0` is the example: it starts with a `bl` and touches r29/r30/r31 that its parent saved.
+    Checking them against their parent's save set instead reports 61 of them, and every one is a false
+    positive: a fragment writing a register its parent never saved is what the register allocator does
+    when it *intends* the value to survive the call. The parent is where a real missing save would be
+    caught, and it is not there.
   * Entries that take r14..r31 from somewhere other than their own frame: a longjmp reading them out of
     a jmp_buf (`sub_8229BF80`, reached from Com_Error), and the GCC exception landing pads that get r31
     from r12 and then read the registers out of the unwinder's frame (`sub_8229B018`, `sub_822B3B78`).
@@ -106,7 +110,7 @@ def revisar(nombre, cuerpo):
     if nombre.startswith("__restgprlr_") or nombre.startswith("__savegprlr_"):
         return None
     if not PROLOGO.search(cuerpo):
-        return None  # continuation of the function above; its parent owns the frame.
+        return None  # a local label, not a function; see the note above about why it is not checked.
     if desde_fuera(cuerpo):
         return None  # takes r14..r31 from a jmp_buf or the unwinder; they are not its to preserve.
 

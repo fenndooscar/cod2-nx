@@ -398,6 +398,21 @@ LONG CALLBACK ManejadorExcepciones(EXCEPTION_POINTERS* info) {
                   static_cast<unsigned long long>(tocado),
                   DondeEsta(info->ContextRecord->Rip).c_str());
     EscribirCrudoYLog(linea);
+
+    // The host registers, which are the ground truth: the guest's r3 is the argument the host
+    // instruction is actually using, so comparing the two says whether the guest context below is
+    // the faulting thread's at all.
+    std::snprintf(linea, sizeof(linea),
+                  "  host: rip=0x%016llX rcx=0x%016llX rdx=0x%016llX r8=0x%016llX r9=0x%016llX "
+                  "rsp=0x%016llX",
+                  static_cast<unsigned long long>(info->ContextRecord->Rip),
+                  static_cast<unsigned long long>(info->ContextRecord->Rcx),
+                  static_cast<unsigned long long>(info->ContextRecord->Rdx),
+                  static_cast<unsigned long long>(info->ContextRecord->R8),
+                  static_cast<unsigned long long>(info->ContextRecord->R9),
+                  static_cast<unsigned long long>(info->ContextRecord->Rsp));
+    EscribirCrudoYLog(linea);
+
     VolcarContextoInvitado();
     void* marcos[kMarcos] = {};
     const USHORT cuantos = RtlCaptureStackBackTrace(0, kMarcos, marcos, nullptr);

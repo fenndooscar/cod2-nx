@@ -65,6 +65,41 @@
 
 # --- fin RENDIMIENTO raiz ---
 
+# ----------------------------------------------------------------------------
+#  setjmp / longjmp  (ROOT KEY - must stay above [functions], see the warning
+#  at the top of this file: written further down it lands inside [functions],
+#  the codegen does not read it and does not complain.)
+#
+#  Without this, a non-local jump corrupts the thread context and the crash
+#  shows up far away from the cause. To find the pair in the disassembly:
+#    setjmp  saves r14-r31 + LR + CR + SP to the buffer at r3 and returns 0
+#    longjmp restores that buffer and ends in mtctr/bctr
+#
+#  Both addresses below are this game's, found in its own generated code.
+#
+#  longjmp = 0x8229BF80. It returns `val ? val : 1` in r3 (the `cmpwi r4,0` /
+#  `bne` / `li r6,1` before the restore) and reads the buffer it was handed at
+#  exactly 144 = r1, 152 = r13, 160..296 = r14..r31, 304 = CR, 308 = LR, 312 = a
+#  validity flag; when that flag is set it calls RtlUnwind instead. Com_Error
+#  calls it as `longjmp(*(tls+8), -1)` right before its epilogue.
+#
+#  setjmp = 0x8229F930. It writes exactly those offsets (r1 to 144, r13 to 152,
+#  r14..r31 to 160..296, CR to 304, LR to 308, f14..f31 to 0..136) and returns 0.
+#
+#  Why this is not optional here: with no address declared, the generator emits
+#  a plain call for longjmp, so the call *returns* into the instruction after it,
+#  and that instruction is only reachable in the original through a branch - the
+#  port executes code the game never does. In Com_Error (0x8233AB80) the code
+#  after the longjmp is `addi r3,r27,56` / `bl RtlLeaveCriticalSection`, and r27
+#  is one of the registers the longjmp just overwrote with whatever the setjmp
+#  site had in it: the port hands RtlLeaveCriticalSection a garbage guest pointer
+#  (0x238, 0x3B083B38, ...) and dies with an access violation inside
+#  rexruntime.dll. Declaring the pair makes the generator emit ppc_longjmp and
+#  ppc_setjmp, which use the host's own non-local jump and never return.
+# ----------------------------------------------------------------------------
+setjmp_address  = 0x8229F930
+longjmp_address = 0x8229BF80
+
 [functions]
 
 # Functions with a REX_HOOK_RAW hook that reads non-volatile registers of its caller. With
@@ -240,16 +275,6 @@
 #  analysis did not find. (Not documented in the wiki.)
 # ----------------------------------------------------------------------------
 # indirect_calls = [0x82000000]
-
-# ----------------------------------------------------------------------------
-#  setjmp / longjmp
-#  Without this, non-local jumps corrupt the thread context and the crash
-#  shows up far away from the cause. To find them in the disassembly:
-#    setjmp  saves r14-r31 + LR + CR + SP to the buffer at r3 and returns 0
-#    longjmp restores that buffer and ends in mtctr/bctr
-# ----------------------------------------------------------------------------
-# setjmp_address  = 0x82000000
-# longjmp_address = 0x82000000
 
 # ----------------------------------------------------------------------------
 #  GENERATED CODE QUALITY
