@@ -33,6 +33,9 @@
 //     instruction that touched it, so this adds the host instruction and a stack for the first few.
 //     `Unhandled guest access violation: read of guest 0x0000004C` is a null base plus a field
 //     offset, and only the instruction says which field of which object was expected there.
+//     It also dumps the guest registers of the faulting thread (lr names the call site) and reads the
+//     game's own fatal-error buffer, because the death is usually a second failure inside the loop that
+//     reports the first one, and the first one is written nowhere else.
 //
 //   The addresses are host addresses; tools/pc/direccion.py turns them into the sub_XXXXXXXX of the
 //   generated code, using logs/simbolos.csv (see cod2_pc_simbolos.cpp).
@@ -54,6 +57,8 @@
 
 #include <rex/cvar.h>
 #include <rex/logging.h>
+#include <rex/system/kernel_state.h>
+#include <rex/system/thread_state.h>
 
 #include <atomic>
 #include <cstdarg>
@@ -78,6 +83,14 @@ constexpr DWORD kViolacionAcceso = 0xC0000005;
 constexpr int kMarcos = 24;
 constexpr int kConPila = 16;  // how many thrown exceptions get their stack written
 constexpr int kViolacionesConPila = 4;  // and how many access violations
+
+// The game's own fatal-error path, both read straight out of guest memory. They are the only copy of what
+// the game was complaining about: the process dies inside the loop that reports it, so it never reaches
+// the log. Addresses from the generated code of sub_8233AB80 (Com_Error):
+//   0x83D45480  the 4096-byte buffer it formats the message into (`addi r4,r11,21632`, r11=0x83D40000)
+//   0x83D376AC  its re-entrancy flag, non-zero once it is inside that loop (`lwz r11,30380(r28)`)
+constexpr uint32_t kBufferComError = 0x83D45480;
+constexpr uint32_t kBanderaComError = 0x83D376AC;
 
 std::atomic<int> g_lanzadas{0};
 std::atomic<int> g_violaciones{0};
@@ -238,6 +251,70 @@ void DescribirExcepcion(const EXCEPTION_RECORD& r, char* salida, size_t tam) {
   }
 }
 
+// What the guest was doing when it faulted. The SDK's line names the guest address that was touched; this
+// names the guest code that touched it, which is what the generated code speaks in:
+//
+//   lr      where the guest function running right now will return to, so it is the exact call site.
+//           sub_8233AB80 (Com_Error) leaves 0x8233AC50 or 0x8233ACFC there depending on which of its two
+//           RtlLeaveCriticalSection calls it is inside.
+//   r3..r6  the arguments that call was made with.
+//   r27..   the callee-saved registers, which is where a corrupted pointer shows up first.
+//
+// Then the game's own fatal-error state. It is the only copy of what the game was complaining about: the
+// process dies inside the loop that reports it, so it never reaches the log.
+void VolcarContextoInvitado() {
+  char linea[1024];
+  auto* estado = rex::runtime::ThreadState::Get();
+  if (!estado || !estado->context()) {
+    EscribirCrudo("  invitado: el hilo que falla no es del juego (sin contexto)");
+    return;
+  }
+  const auto& c = *estado->context();
+  std::snprintf(linea, sizeof(linea),
+                "  invitado: hilo=0x%08X lr=0x%08X r3=0x%08X r4=0x%08X r5=0x%08X r6=0x%08X "
+                "r27=0x%08X r28=0x%08X r29=0x%08X r30=0x%08X r31=0x%08X r1=0x%08X r13=0x%08X "
+                "ctr=0x%08X",
+                estado->thread_id(), uint32_t(c.lr), c.r3.u32, c.r4.u32, c.r5.u32, c.r6.u32,
+                c.r27.u32, c.r28.u32, c.r29.u32, c.r30.u32, c.r31.u32, c.r1.u32, c.r13.u32,
+                c.ctr.u32);
+  EscribirCrudoYLog(linea);
+
+  auto* memoria = estado->memory();
+  if (!memoria) {
+    EscribirCrudo("  invitado: sin memoria que leer");
+    return;
+  }
+  const uint8_t* base = memoria->virtual_membase();
+  auto leer = [base](uint32_t invitado, void* destino, size_t cuantos) {
+    SIZE_T leidos = 0;
+    return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(base + invitado),
+                             destino, cuantos, &leidos) != 0;
+  };
+
+  char mensaje[512] = {};
+  if (leer(kBufferComError, mensaje, sizeof(mensaje) - 1)) {
+    for (char& ch : mensaje) {
+      if (ch == '\n' || ch == '\r' || ch == '\t') {
+        ch = ' ';
+      } else if (static_cast<unsigned char>(ch) < 0x20) {
+        ch = '.';
+      }
+    }
+    std::snprintf(linea, sizeof(linea), "  Com_Error dice: \"%s\"", mensaje);
+  } else {
+    std::snprintf(linea, sizeof(linea), "  Com_Error: no se pudo leer 0x%08X", kBufferComError);
+  }
+  EscribirCrudoYLog(linea);
+
+  uint32_t bandera = 0;
+  leer(kBanderaComError, &bandera, sizeof(bandera));
+  std::snprintf(linea, sizeof(linea),
+                "  Com_Error reentrante=0x%08X (distinto de cero = el juego ya estaba informando de un "
+                "error fatal antes de fallar aqui)",
+                bandera);
+  EscribirCrudoYLog(linea);
+}
+
 LONG CALLBACK ManejadorExcepciones(EXCEPTION_POINTERS* info) {
   const EXCEPTION_RECORD& r = *info->ExceptionRecord;
   if (r.ExceptionCode != kFalloRapido && r.ExceptionCode != kExcepcionCpp &&
@@ -266,6 +343,7 @@ LONG CALLBACK ManejadorExcepciones(EXCEPTION_POINTERS* info) {
                   static_cast<unsigned long long>(tocado),
                   DondeEsta(info->ContextRecord->Rip).c_str());
     EscribirCrudoYLog(linea);
+    VolcarContextoInvitado();
     void* marcos[kMarcos] = {};
     const USHORT cuantos = RtlCaptureStackBackTrace(0, kMarcos, marcos, nullptr);
     for (USHORT i = 0; i < cuantos; ++i) {
