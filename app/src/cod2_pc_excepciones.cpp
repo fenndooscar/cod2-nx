@@ -38,7 +38,8 @@
 //     reports the first one, and the first one is written nowhere else.
 //
 //   The addresses are host addresses; tools/pc/direccion.py turns them into the sub_XXXXXXXX of the
-//   generated code, using logs/simbolos.csv (see cod2_pc_simbolos.cpp).
+//   generated code, using logs/simbolos.csv (see cod2_pc_simbolos.cpp). The guest stack it also prints
+//   is already in sub_XXXXXXXX form.
 //
 // How to turn it off without a rebuild
 //   --cod2_pc_excepciones=false
@@ -313,6 +314,60 @@ void VolcarContextoInvitado() {
                 "error fatal antes de fallar aqui)",
                 bandera);
   EscribirCrudoYLog(linea);
+
+  // The guest's own call stack, which the host one cannot give: a hundred generated functions share the
+  // same host frame shape, so RtlCaptureStackBackTrace returns host addresses that tools/pc/direccion.py
+  // can turn back into sub_XXXXXXXX, but the *guest* chain is what names the game's functions directly.
+  //
+  // It is walkable because the generated `stwu r1,-N(r1)` stores the caller's r1 at the new r1, exactly
+  // as the instruction does, so 0(r1) is the previous frame. Each frame's words are then scanned for
+  // values inside the code range, which is where the saved return address is.
+  constexpr uint32_t kCodigoInicio = 0x82090000;  // from app/cod2_manifest.toml, the same range
+  constexpr uint32_t kCodigoFin = 0x824A8DEC;     // cod2_pc_simbolos.cpp walks.
+  constexpr int kMarcosInvitado = 20;
+
+  std::snprintf(linea, sizeof(linea), "  pila del invitado desde r1=0x%08X:", c.r1.u32);
+  EscribirCrudoYLog(linea);
+
+  uint32_t sp = c.r1.u32;
+  for (int marco = 0; marco < kMarcosInvitado && sp >= 0x1000; ++marco) {
+    uint32_t arriba = 0;
+    if (!leer(sp, &arriba, sizeof(arriba))) {
+      break;
+    }
+    arriba = __builtin_bswap32(arriba);  // guest words are big-endian
+    if (arriba <= sp || arriba - sp > 0x10000) {
+      arriba = sp + 128;  // not a back chain any more; still worth one frame of scanning
+    }
+
+    uint32_t palabras[64] = {};
+    uint32_t cuantas = (arriba - sp) / 4;
+    if (cuantas > 64) {
+      cuantas = 64;
+    }
+    if (!leer(sp, palabras, cuantas * sizeof(uint32_t))) {
+      break;
+    }
+
+    char destinos[320] = {};
+    size_t usados = 0;
+    for (uint32_t i = 0; i < cuantas; ++i) {
+      const uint32_t valor = __builtin_bswap32(palabras[i]);
+      if (valor >= kCodigoInicio && valor < kCodigoFin) {
+        const int escritos = std::snprintf(destinos + usados, sizeof(destinos) - usados, "%s0x%08X",
+                                           usados ? " " : "", valor);
+        if (escritos <= 0 || size_t(escritos) >= sizeof(destinos) - usados) {
+          break;
+        }
+        usados += size_t(escritos);
+      }
+    }
+    std::snprintf(linea, sizeof(linea), "    marco %2d: sp=0x%08X  codigo en la pila: %s", marco, sp,
+                  destinos[0] ? destinos : "(ninguno)");
+    EscribirCrudoYLog(linea);
+
+    sp = arriba;
+  }
 }
 
 LONG CALLBACK ManejadorExcepciones(EXCEPTION_POINTERS* info) {
