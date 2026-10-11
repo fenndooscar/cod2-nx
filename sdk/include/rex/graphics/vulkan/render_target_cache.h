@@ -79,6 +79,18 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
   struct Framebuffer {
     VkFramebuffer framebuffer = VK_NULL_HANDLE;
     VkExtent2D host_extent{};
+    // cod2 - the part of host_extent the guest really draws into, grown as it is
+    // discovered (0 = not known yet, use host_extent). host_extent is the size of
+    // the EDRAM allocation, not of the image the guest uses: a 1280-wide 32bpp
+    // render target is 2048 rows tall because that is what fits in the 10 MB of
+    // EDRAM (RenderTargetCache::GetRenderTargetHeight), while the guest's scissor
+    // here is 1280x720. Ending a render pass stores every attachment and the next
+    // begin loads it back (docs/platform-notes.md), so the render area is what each
+    // of those round trips costs. Only VulkanCommandProcessor::IssueDraw grows
+    // this, so the transfer framebuffers, which are separate objects, keep using
+    // the whole host_extent.
+    uint32_t used_width = 0;
+    uint32_t used_height = 0;
     Framebuffer() = default;
     Framebuffer(VkFramebuffer framebuffer, const VkExtent2D& host_extent)
         : framebuffer(framebuffer), host_extent(host_extent) {}

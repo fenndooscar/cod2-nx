@@ -193,8 +193,15 @@ class VulkanCommandProcessor : public CommandProcessor {
 
   // If not started yet, begins a render pass from the render target cache.
   // Submission must be open.
+  //
+  // area_width and area_height are the part of framebuffer->host_extent to use as
+  // the render area (0 = the whole host_extent). Ending a render pass on this GPU
+  // stores every attachment and beginning one loads it back, and the render area is
+  // what that costs, so the caller that knows how much the guest really draws into
+  // passes it here. See the cod2 note on Framebuffer::used_width.
   void SubmitBarriersAndEnterRenderTargetCacheRenderPass(
-      VkRenderPass render_pass, const VulkanRenderTargetCache::Framebuffer* framebuffer);
+      VkRenderPass render_pass, const VulkanRenderTargetCache::Framebuffer* framebuffer,
+      uint32_t area_width = 0, uint32_t area_height = 0);
   // Overload for transfer operations with dynamic rendering.
   void SubmitBarriersAndEnterRenderTargetCacheRenderPass(
       VkRenderPass render_pass, const VulkanRenderTargetCache::Framebuffer* framebuffer,
@@ -793,6 +800,11 @@ class VulkanCommandProcessor : public CommandProcessor {
   // but in_render_pass_ is true.
   VkRenderPass current_render_pass_;
   const VulkanRenderTargetCache::Framebuffer* current_framebuffer_;
+  // cod2 - the render area the pass that is open was begun with, so that a draw
+  // that needs more of the render target ends the pass and begins it again with a
+  // larger area instead of being clipped. 0 when no pass is open.
+  uint32_t current_render_area_width_ = 0;
+  uint32_t current_render_area_height_ = 0;
   bool in_render_pass_ = false;
 
   // Currently bound graphics pipeline, either from the pipeline cache (with

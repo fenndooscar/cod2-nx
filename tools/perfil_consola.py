@@ -26,6 +26,12 @@ average of the numbers that say which resource is exhausted:
   pases/fot      render passes the frame ends. On a tile-based GPU each end stores the whole tile buffer
                  to memory and the next begin loads it back, so this times the attachments is a floor on
                  the frame's traffic that no shading change can remove.
+  area MB/fot    the attachment pixels of those passes, in MB per frame, colour plane only. This is what
+                 "pases/fot" is multiplied by to get the traffic, so it is the number that says whether
+                 cod2_area_de_dibujo_ajustada (draw only into the part of the render target the guest's
+                 scissor covers) is actually shrinking the render area: with it off, a 1280-wide target
+                 gives 10 MB per pass, because the image is as tall as the EDRAM allocation (2048 rows),
+                 not as tall as the guest's 720 (3.5 MB).
   barrera/fot    draws that push a barrier over the whole shared memory buffer, because the port cannot
                  narrow down where the memexport writes. Each one also cuts the render pass in two.
 
@@ -81,6 +87,7 @@ def numeros(bloque):
         ("gpu", r'"GPU Commands \(F": CPU ([\d.]+)%'),
         ("espera", r"fences consultadas [\d.]+ \([\d.]+ ms\), esperadas [\d.]+ \(([\d.]+) ms\)"),
         ("pases", r"pases de render: ([\d.]+) finales por fotograma"),
+        ("area", r"\| area ([\d.]+) MB por fotograma"),
         ("barrera", r"\| ([\d.]+) dibujados con barrera de toda la memoria compartida"),
     ):
         f = re.search(patron, t)
@@ -122,18 +129,18 @@ def main():
         e.append(d)
 
     cabecera = ("escena", "n", "fps", "CPU%", "dib/fot", "MB/fot", "fallos/s", "espera ms/s",
-                "MainXThread", "GPU Cmds", "2o XThread", "pases/fot", "barrera/fot")
-    print("%-11s %4s %8s %6s %8s %8s %10s %11s %11s %9s %10s %10s %12s" % cabecera)
+                "MainXThread", "GPU Cmds", "2o XThread", "pases/fot", "area MB/f", "barrera/fot")
+    print("%-11s %4s %8s %6s %8s %8s %10s %11s %11s %9s %10s %10s %10s %12s" % cabecera)
     for nombre in ("menu", "juego", "cinematica"):
         v = total.get(nombre)
         if not v:
             continue
         n = len(v)
         media = lambda c: sum(x[c] for x in v) / n
-        print("%-11s %4d %8.2f %6.0f %8.1f %8.2f %10.0f %11.0f %10.1f%% %8.1f%% %9.1f%% %10.1f %12.1f" % (
+        print("%-11s %4d %8.2f %6.0f %8.1f %8.2f %10.0f %11.0f %10.1f%% %8.1f%% %9.1f%% %10.1f %10.2f %12.1f" % (
             nombre, n, media("fps"), media("cpu"), media("dib"), media("mb"), media("fallos"),
             media("espera"), media("main"), media("gpu"), media("otro"), media("pases"),
-            media("barrera")))
+            media("area"), media("barrera")))
     print()
     print("informes leidos: %d (%d s de sesion)" % (informes, informes * 10))
     print("dibujados por ancho de la superficie, medio por escena:")

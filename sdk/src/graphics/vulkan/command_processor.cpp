@@ -77,6 +77,32 @@ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
                     "device (falls back to render passes otherwise)")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+// cod2 - draw only into the part of the render target the guest uses.
+//
+// The render target image is as tall as the EDRAM allocation, not as tall as the
+// image the guest draws into: RenderTargetCache::GetRenderTargetHeight gives 2048
+// rows for a 1280-wide 32bpp target, because that is the whole 10 MB of EDRAM. The
+// render area used to be that whole allocation, while this game's scissor is
+// 1280x720 (the profiler's "tijera" counter is one screen per draw at 720p, and the
+// driver's own ZCULL plane for the depth target says 1280x2048). On this tile-based
+// GPU every render pass that ends stores the attachments and the next begin loads
+// them back, so the render area is what each of the ~140 round trips per frame
+// costs, and 2048 rows is 2.8 times the 720 the game asked for.
+//
+// This is the SDK's own TODO in SubmitBarriersAndEnterRenderTargetCacheRenderPass
+// ("Actual dirty width / height in the deferred command buffer"). The scissor is
+// the hardware bound of what a draw can write, so the union of the scissors seen so
+// far is a safe area; when a draw needs more, the pass is ended and begun again
+// with the larger area. Only draws feed it, and the transfers and resolve clears use
+// their own framebuffers (see PerformTransfersAndResolveClears), which keep the full
+// host_extent, so nothing else can be clipped.
+//
+// Set it to false in cod2.toml next to the .nro to get the whole allocation back.
+REXCVAR_DEFINE_BOOL(cod2_area_de_dibujo_ajustada, true, "GPU/Vulkan",
+                    "Draw only into the part of the render target the guest's scissor covers, "
+                    "instead of the whole EDRAM allocation")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 namespace rex::graphics::vulkan {
 
 namespace {
@@ -3129,19 +3155,32 @@ bool VulkanCommandProcessor::SubmitBarriers(bool force_end_render_pass) {
 }
 
 void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
-    VkRenderPass render_pass, const VulkanRenderTargetCache::Framebuffer* framebuffer) {
+    VkRenderPass render_pass, const VulkanRenderTargetCache::Framebuffer* framebuffer,
+    uint32_t area_width, uint32_t area_height) {
   SubmitBarriers(false);
   const ui::vulkan::VulkanDevice* vulkan_device = GetVulkanDevice();
   bool use_dynamic_rendering =
       REXCVAR_GET(vulkan_dynamic_rendering) && vulkan_device->properties().dynamicRendering;
 
+  // cod2 - the render area to use, never larger than the framebuffer. See the note on
+  // cod2_area_de_dibujo_ajustada: ending a pass stores the attachments, so this is what the round trip costs.
+  VkExtent2D render_area = framebuffer->host_extent;
+  if (area_width && area_height && area_width <= render_area.width &&
+      area_height <= render_area.height) {
+    render_area.width = area_width;
+    render_area.height = area_height;
+  }
+
   if (use_dynamic_rendering) {
     if (in_render_pass_ && current_framebuffer_ == framebuffer &&
-        current_render_pass_ == VK_NULL_HANDLE) {
+        current_render_pass_ == VK_NULL_HANDLE && current_render_area_width_ == render_area.width &&
+        current_render_area_height_ == render_area.height) {
       return;
     }
   } else {
-    if (current_render_pass_ == render_pass && current_framebuffer_ == framebuffer) {
+    if (current_render_pass_ == render_pass && current_framebuffer_ == framebuffer &&
+        current_render_area_width_ == render_area.width &&
+        current_render_area_height_ == render_area.height) {
       return;
     }
   }
@@ -3157,6 +3196,8 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
 
   current_render_pass_ = use_dynamic_rendering ? VK_NULL_HANDLE : render_pass;
   current_framebuffer_ = framebuffer;
+  current_render_area_width_ = render_area.width;
+  current_render_area_height_ = render_area.height;
 
   if (use_dynamic_rendering) {
     VkRenderingAttachmentInfo color_attachments[xenos::kMaxColorRenderTargets];
@@ -3174,7 +3215,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
     rendering_info.flags = 0;
     rendering_info.renderArea.offset.x = 0;
     rendering_info.renderArea.offset.y = 0;
-    rendering_info.renderArea.extent = framebuffer->host_extent;
+    rendering_info.renderArea.extent = render_area;
     rendering_info.layerCount = 1;
     rendering_info.viewMask = 0;
     rendering_info.colorAttachmentCount = color_attachment_count;
@@ -3191,8 +3232,8 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
     render_pass_begin_info.renderArea.offset.x = 0;
     render_pass_begin_info.renderArea.offset.y = 0;
     // TODO(Triang3l): Actual dirty width / height in the deferred command
-    // buffer.
-    render_pass_begin_info.renderArea.extent = framebuffer->host_extent;
+    // buffer. (cod2: the caller can now pass it in area_width / area_height.)
+    render_pass_begin_info.renderArea.extent = render_area;
     render_pass_begin_info.clearValueCount = 0;
     render_pass_begin_info.pClearValues = nullptr;
     deferred_command_buffer_.CmdVkBeginRenderPass(&render_pass_begin_info,
@@ -3209,13 +3250,19 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
   bool use_dynamic_rendering =
       REXCVAR_GET(vulkan_dynamic_rendering) && vulkan_device->properties().dynamicRendering;
 
+  // cod2 - a transfer covers the whole render target, so it must not reuse a pass that a draw began with a
+  // smaller render area (cod2_area_de_dibujo_ajustada), or the transfer would be clipped.
   if (use_dynamic_rendering) {
     if (in_render_pass_ && current_framebuffer_ == framebuffer &&
-        current_render_pass_ == VK_NULL_HANDLE) {
+        current_render_pass_ == VK_NULL_HANDLE &&
+        current_render_area_width_ == framebuffer->host_extent.width &&
+        current_render_area_height_ == framebuffer->host_extent.height) {
       return;
     }
   } else {
-    if (current_render_pass_ == render_pass && current_framebuffer_ == framebuffer) {
+    if (current_render_pass_ == render_pass && current_framebuffer_ == framebuffer &&
+        current_render_area_width_ == framebuffer->host_extent.width &&
+        current_render_area_height_ == framebuffer->host_extent.height) {
       return;
     }
   }
@@ -3231,6 +3278,8 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
 
   current_render_pass_ = use_dynamic_rendering ? VK_NULL_HANDLE : render_pass;
   current_framebuffer_ = framebuffer;
+  current_render_area_width_ = framebuffer->host_extent.width;
+  current_render_area_height_ = framebuffer->host_extent.height;
 
   if (use_dynamic_rendering) {
     VkRenderingAttachmentInfo color_attachment = {};
@@ -3303,6 +3352,15 @@ void VulkanCommandProcessor::EndRenderPass() {
   // again, so this is the count of full-attachment round trips to memory per frame. It is here, and not at
   // the call sites, because this is the only place that actually ends a pass.
   RexSwitchPerfCount(33);
+  // Counter 35: the pixels of attachment that round trip is made of, so the report can turn counter 33 into
+  // megabytes per frame instead of leaving it as a count. Four bytes per pixel per attachment; the count of
+  // attachments is not tracked here, so this is the colour plane only, and the real traffic is at least twice
+  // this when the pass has depth. It is the render area, not the size of the image, because that is what the
+  // store and the load cover: comparing it against the passes per frame is what says whether
+  // cod2_area_de_dibujo_ajustada is really shrinking the passes.
+  if (current_render_area_width_ && current_render_area_height_) {
+    RexSwitchPerfAdd(35, uint64_t(current_render_area_width_) * current_render_area_height_ * 4);
+  }
 #endif
   if (current_render_pass_ == VK_NULL_HANDLE) {
     deferred_command_buffer_.CmdVkEndRendering();
@@ -3311,6 +3369,8 @@ void VulkanCommandProcessor::EndRenderPass() {
   }
   current_render_pass_ = VK_NULL_HANDLE;
   current_framebuffer_ = nullptr;
+  current_render_area_width_ = 0;
+  current_render_area_height_ = 0;
   in_render_pass_ = false;
 }
 
@@ -4162,12 +4222,36 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
   }
 
+  // cod2 - how much of the render target this draw can write, so that the render area is the part of it the
+  // guest really uses and not the whole EDRAM allocation (see cod2_area_de_dibujo_ajustada). The scissor is
+  // the hardware bound: no draw can write outside it, so the union of the scissors seen so far is a safe
+  // area, and it only grows, so a pass is begun again only when the guest reaches further than before.
+  uint32_t area_width = 0, area_height = 0;
+  if (REXCVAR_GET(cod2_area_de_dibujo_ajustada)) {
+    auto* area_framebuffer = const_cast<VulkanRenderTargetCache::Framebuffer*>(
+        render_target_cache_->last_update_framebuffer());
+    if (area_framebuffer && dynamic_scissor_.extent.width && dynamic_scissor_.extent.height) {
+      const uint32_t hasta_x =
+          std::min(area_framebuffer->host_extent.width,
+                   uint32_t(dynamic_scissor_.offset.x) + dynamic_scissor_.extent.width);
+      const uint32_t hasta_y =
+          std::min(area_framebuffer->host_extent.height,
+                   uint32_t(dynamic_scissor_.offset.y) + dynamic_scissor_.extent.height);
+      area_framebuffer->used_width = std::max(area_framebuffer->used_width, hasta_x);
+      area_framebuffer->used_height = std::max(area_framebuffer->used_height, hasta_y);
+    }
+    if (area_framebuffer && area_framebuffer->used_width && area_framebuffer->used_height) {
+      area_width = area_framebuffer->used_width;
+      area_height = area_framebuffer->used_height;
+    }
+  }
+
   // After all commands that may dispatch, copy or insert barriers, submit
   // the barriers (may end the render pass), and (re)enter the render pass
   // before drawing.
   SubmitBarriersAndEnterRenderTargetCacheRenderPass(
       render_target_cache_->last_update_render_pass(),
-      render_target_cache_->last_update_framebuffer());
+      render_target_cache_->last_update_framebuffer(), area_width, area_height);
 
   // Draw.
 #if REX_PLATFORM_SWITCH

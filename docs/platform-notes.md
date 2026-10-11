@@ -21,6 +21,9 @@ drawn through [Mesa](glossary.md#mesa) on the Switch.
   same or lower priority run on its core.
 - In NVK, every fence check and every queue submission is a call into the system, and GPU memory allocations are slow
   and limited in number.
+- The GPU is tile-based, so a render pass that ends stores every attachment to memory and the next begin loads it
+  back. Render target images are as tall as the EDRAM allocation (2048 rows for a 1280-wide one), not as tall as the
+  image the guest draws into, so the render area is worth setting from the guest's scissor.
 - Presentation has fixed limits: one Vulkan queue, three swapchain images, and only the FIFO and IMMEDIATE modes.
 - SaltyNX never loads itself into a homebrew program, so the console overlays show no FPS and ReverseNX-RT does
   nothing until the program writes their shared blocks itself. See [console-overlays.md](console-overlays.md).
@@ -232,6 +235,18 @@ how that driver behaves on the console:
   (`pases de render` in the report, counter 33 of `sdk/src/ui/switch_perf.cpp`); if that number is of the same order as
   the draws per frame, the frame is being cut into a render pass per draw. `sdk/src/graphics/vulkan/render_target_cache.cpp`
   already carries the SDK's own TODO for the same problem ("avoid stores and loads on tile-based devices").
+- **The render area is the EDRAM allocation, not the image the guest uses.** The render target image is created as
+  tall as what fits in EDRAM: `RenderTargetCache::GetRenderTargetHeight`
+  (`sdk/src/graphics/pipeline/render_target/cache.cpp`) gives **2048 rows** for a 1280-wide 32bpp target, and the
+  driver's own ZCULL log line agrees (`plano de 64224 bytes para profundidad 1280x2048`). The guest's
+  `PA_SC_SCREEN_SCISSOR` in this game is 1280x720, so a render pass that covered the whole allocation stored and
+  reloaded 2.8 times the pixels it had to (10 MB of colour attachment per pass instead of 3.5), once per pass.
+  `Framebuffer` now carries the union of the scissors seen so
+  far (`used_width` / `used_height`, grown by `VulkanCommandProcessor::IssueDraw`) and passes it as the render area;
+  a draw that reaches further than any before it makes the pass begin again with a larger area, so nothing is
+  clipped, and the transfers and resolve clears, which use framebuffers of their own, keep the whole allocation. The
+  setting `cod2_area_de_dibujo_ajustada = false` restores the old area, and counter 35 (`area MB por fotograma`) is
+  the measurement of it.
 
 ## Presentation
 

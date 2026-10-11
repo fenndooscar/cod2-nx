@@ -235,6 +235,9 @@ declaring functions inside functions, and one hand-added entry in `app/huecos.to
     ordering in place, reads **5.0–5.8 FPS**, 281–403 draws, 32–60 resolves, 33–60 texture loads and 26–28 MB
     uploaded per frame, and still **744–774 ms of every second waiting for fences**. The clock alone accounts for
     3.26 × 460.8/307.2 = 4.89 of that, so the ordering was worth about +10 % on top: real, and nowhere near enough.
+    A third session (`switch-logs/logs`, 2026-10-12) reads **4.86 FPS over 13 in-game reports** with 333 draws and
+    the two renderer defaults of `app/src/cod2_rendimiento.cpp` demonstrably applied — that is, the changes of the
+    second round bought nothing, which is what the two counters added for it were for.
     The evidence, all from the first log:
     - `libnx por segundo` spends **834 ms of every second** waiting for fences (83 % of the wall time), while the
       game's own main thread answers `0 % esperando en el kernel` — it is not blocked, it is spinning on the GPU.
@@ -256,18 +259,32 @@ declaring functions inside functions, and one hand-added entry in `app/huecos.to
        Two settings the SDK carries and the guest never asked for are already switched off in
        `app/src/cod2_rendimiento.cpp`: `anisotropic_override = 3`, which overwrites the fetch constant's own
        anisotropic filtering with 4x on every texture that has mips, and `gamma_render_target_as_unorm16`, which
-       makes a `k_8_8_8_8_GAMMA` target eight bytes per pixel instead of the four the EDRAM holds. A third change
-       is in the SDK's own per-draw path: `VulkanRenderTargetCache::Update` pushed a barrier for every used render
-       target on every update — once per draw in this game — and the barrier was a no-op whenever the target was
-       already in the draw usage, because every field of it had the same source and destination. Any pending
-       barrier makes `SubmitBarriers` end the render pass, and on a tile-based GPU that stores every attachment to
-       memory and loads it back when the next pass begins. The no-op barrier is now skipped; the count of pass
-       ends per frame is in the report so the next session can say what it was worth. The second console session
-       (`switch-logs/logs`, 2026-10-11) added that counter and one more: `N dibujados con barrera de toda la
-       memoria compartida`, the memexport-capable draws whose destination the port cannot narrow down and which
-       cut a pass each;
-    3. the guest busy-waits, once 2 fits;
-    4. function ordering (done): `app/orden_funciones.ld` held 555 of the other game's addresses and matched nothing.
+       makes a `k_8_8_8_8_GAMMA` target eight bytes per pixel instead of the four the EDRAM holds. Two further
+       changes are in the SDK's own per-draw path. The first is a barrier in `VulkanRenderTargetCache::Update`
+       that was pushed for every used render target on every update — once per draw in this game — and was a
+       no-op whenever the target was already in the draw usage, because every field of it had the same source and
+       destination. It is now skipped, and the second console session (`switch-logs/logs`, 2026-10-11, 14 in-game
+       reports) says it was **worth nothing**: 4.9–5.4 FPS, inside the run-to-run spread. The reason is that
+       `SubmitBarriersAndEnterRenderTargetCacheRenderPass` already returns early when the pass and the framebuffer
+       are unchanged, so removing a barrier that ordered nothing removed no pass. The passes come from the call
+       sites that pass `force_end_render_pass = true`, and those have to end the pass: what follows them — a
+       resolve into a texture, a texture upload, a compute dispatch — cannot run inside a render pass at all;
+    5. the render area of those passes (done, and the first change sized against a measured number). That same
+       second session added two counters: `N pases de render` per frame and `N dibujados con barrera de toda la
+       memoria compartida`. In game the first reads **141.9 against 333 draws**, and the second **0.0**, which
+       rules the whole-shared-memory memexport barrier out. A render target image is as tall as the EDRAM
+       allocation, not as tall as the image the guest uses: `RenderTargetCache::GetRenderTargetHeight` gives 2048
+       rows for a 1280-wide 32bpp target, because that is the whole 10 MB of EDRAM, while this game's scissor is
+       1280x720 (the driver's own ZCULL plane for the depth target says 1280x2048). Every one of those 141.9
+       passes therefore stored and reloaded 2.8 times the pixels it had to. `Framebuffer` now carries the union
+       of the scissors seen so far and the draw path passes it as the render area — the scissor is the hardware
+       bound of what a draw can write, so the union is safe, and it only grows, so a pass is begun again only
+       when the guest reaches further than before. Transfers and resolve clears use their own framebuffers and
+       keep the whole allocation. `cod2_area_de_dibujo_ajustada = false` in `cod2.toml` gives the old area back
+       without a rebuild, and the report's `area MB por fotograma` (counter 35) is what shows whether it worked:
+       without it a 1280-wide pass costs 10 MB of colour attachment, with it 3.5 MB;
+    6. the guest busy-waits, once the GPU work fits;
+    7. function ordering (done): `app/orden_funciones.ld` held 555 of the other game's addresses and matched nothing.
        It now holds Call of Duty 2's, regenerated with `tools/calientes.py` from `switch-logs/logs-old-1` — the
        session that reaches a level — against the ELF of the same build. Getting there needed two silent failures
        fixed: the linker matches by section name and ignores what it does not find, and a recompiled function's

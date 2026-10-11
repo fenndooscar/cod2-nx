@@ -103,7 +103,7 @@ constexpr u64 kReportSeconds = 10;
 constexpr u64 kStartDelayNs = 8000000000ULL;
 constexpr size_t kMaxSamples = 1 << 15;
 constexpr size_t kFrames = 10;
-constexpr unsigned kCounterCount = 35;
+constexpr unsigned kCounterCount = 36;
 // In <NRO folder>/logs/rex/ (switch_crash_hooks.c computes it at startup).
 std::string ReportPath() {
   return std::string(RexSwitchLogDir()) + "rex_perfil.log";
@@ -548,10 +548,16 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
     // "finales de pase" times the size of the attachments is a floor on the traffic the frame needs, and it
     // is traffic no shading change can remove. "barrera entera" is the part of that which comes from
     // memexport-capable draws whose destination the port cannot narrow down.
+    //
+    // Counter 35 is the render area of those passes (the attachment pixels, four bytes each, colour plane
+    // only), which is what turns the count into megabytes per frame. It is the number the setting
+    // cod2_area_de_dibujo_ajustada moves: it makes a pass cover only the part of the render target the
+    // guest's scissor reaches, instead of the whole EDRAM allocation (2048 rows for a 1280-wide target).
     std::fprintf(f,
                  "     pases de render: %.1f finales por fotograma (cada uno guarda y recarga el bufer de "
-                 "baldosas) | %.1f dibujados con barrera de toda la memoria compartida\n",
-                 delta(33) / frames, delta(34) / frames);
+                 "baldosas) | area %.2f MB por fotograma (solo color) | %.1f dibujados con barrera de toda "
+                 "la memoria compartida\n",
+                 delta(33) / frames, delta(35) / frames / 1048576.0, delta(34) / frames);
   }
 
   for (unsigned i = 0; i < kCounterCount; ++i) {
@@ -1028,7 +1034,10 @@ void __wrap_svcSleepThread(s64 nano) {
  * Counters: 0 = guest present, 1 = read emulated through the shadow,
  * 2 = fault resolved by an SDK handler, 3 = retry emulated through the
  * shadow, 4 = SEH. 28..32 = draws per surface width from IssueDraw
- * (1600 or more, 1280-1599, 640-1279, 256-639, under 256).
+ * (1600 or more, 1280-1599, 640-1279, 256-639, under 256). 33 = render passes
+ * ended (EndRenderPass, each one stores and reloads the tile buffer), 34 =
+ * draws that push a barrier over the whole shared memory, 35 = attachment
+ * pixels of those passes, colour plane only.
  */
 // A long frame, in armGetSystemTick ticks (see VentanaTiron).
 void RexSwitchPerfTiron(u64 inicio, u64 fin) {
