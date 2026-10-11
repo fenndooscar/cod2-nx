@@ -23,6 +23,11 @@ set(COD2_SOURCES
     src/cod2_consola.cpp
     # Profile dump of the instrumented build for PGO (COD2_PGO=generar; empty otherwise).
     src/cod2_pgo.cpp
+    # The game's cutscenes are Bink 1 (`.bik`). This decodes them with FFmpeg instead of letting the guest run its own
+    # recompiled Bink: the guest's decoder is only 8.7 % of a cutscene's CPU, but the frame it writes back is a watched
+    # texture and every read of it faults, which is 58 % (docs/audio-and-video.md). Built by
+    # tools/comprobar_bink.ps1 on its own, and not hooked into the game yet.
+    src/cod2_video_bink.cpp
 )
 
 if(WIN32)
@@ -57,6 +62,12 @@ endif()
 # src/cod2_app.h sets gpu_plugin=xenos by default, so the --gpu_plugin argument is not needed; it can
 # still be passed to change it.
 rexglue_setup_target(cod2 GPU_PLUGINS xenos)
+
+# FFmpeg: src/cod2_video_bink.cpp decodes the game's Bink cutscenes with it. The runtime links libavcodec for its own
+# audio decoder, but privately, so the include path and the library do not reach this target on their own. Both come
+# from the SDK's own libavcodec target, which is where the Bink decoder is enabled
+# (sdk/thirdparty/FFmpeg/config_cod2_bink.h; tools/comprobar_ffmpeg.py checks it stays enabled).
+target_link_libraries(cod2 PRIVATE libavcodec libavutil)
 
 # PC build with the SDK as a subdirectory: rex_app.cpp includes imgui.h and rexruntime links imgui
 # privately, so its include path does not reach the executable. On Switch rexglue_switch.cmake handles it,

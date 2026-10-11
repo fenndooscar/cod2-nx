@@ -198,6 +198,43 @@ The plane state lives in the decoder context in 48-byte records indexed by the d
 and `+4`/`+8` and `+12`/`+16` are the two luma and chroma strides. This is read from `sub_8249F980`, which is the
 caller, so it is the layout the hook has to reproduce.
 
+### The native Bink decoder
+
+`app/src/cod2_video_bink.cpp` decodes a `.bik` with FFmpeg: it parses the container itself and hands FFmpeg the
+compressed bytes of one frame at a time. `app/src/cod2_video_bink.h` is the interface; `PeliculaBink` is the whole
+thing from a game path to a frame's planes.
+
+Three things about the container are worth writing down, because each one fails silently:
+
+* **A frame is not all picture.** When the file has audio tracks, every frame begins with one 32-bit length per
+  track, each followed by that many bytes of audio, and the video packet is what is left. Hand the decoder the whole
+  frame region and it reads audio as picture: it reports `DC value went out of bounds` and returns no frame. Of the
+  game's nine movies, one has no audio and the other eight have one or two tracks, so both branches are live.
+* **The keyframe bit is stored in the entry for the frame itself**, not the next one - and FFmpeg forces the first
+  frame to be a keyframe whatever its bit says, which is what makes the index start somewhere.
+* **The decoder needs the version and the extradata before it is opened**, not after: it takes the version from the
+  top byte of `codec_tag` and the alpha flag from the first byte of the extradata (`decode_init`, `bink.c`). Set
+  either one late and `avcodec_open2` succeeds and then returns no frame.
+
+`tools/comprobar_bink.ps1` is the check, and it runs on all nine files: it parses each one's header and frame index,
+splits the audio off the first frame, and decodes eight frames spread across the movie, asserting the decoded size,
+that the picture is not uniform somewhere, that the frames are not all identical to each other, and that the audio
+split found something to skip. Two mistakes it caught while being written: comparing two `Fotograma`s directly
+compares whatever the decoder is holding *now*, because the planes belong to the decoder and not to the caller; and
+the first frame of every one of these movies is a fade-in from black, so "the first frame has content" is not a
+property of the data.
+
+The nine movies, read from their own headers: `IW_logo.bik` 640x480, everything else 1280x720; `cod2_intro.bik` and
+`cod2_attract.bik` are 3,937 frames at 2997/100, the four campaign ones are 1,564 to 3,136 frames at 500000/16683
+(about 30); `legal.bik` is the only one without audio.
+
+**What is still missing is the join.** The decoder is built and checked but nothing calls it: the port does not yet
+know where in the guest's Bink context the compressed frame is, and an offset guessed is worse than no offset. The
+method for finding it is in the header of `app/src/cod2_video_bink_gancho.cpp`: dump the 17,408-byte context the
+game's `sub_82496B20` returns and search it for the bytes the `.bik` file holds, so the answer is the file's own data
+rather than a plausible-looking number.
+
+
 
 ### The previous port's videos
 
