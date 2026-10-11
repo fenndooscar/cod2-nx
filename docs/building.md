@@ -211,11 +211,35 @@ The NRO expects this layout, the same one the installer page makes:
 
 ```
 sdmc:/switch/cod2-nx/
-    cod2-nx.nro
-    cod2.toml
-    cod2_shaders.nfsp
-    game_root/          the files of the disc
+    cod2-nx.nro         the NRO, renamed
+    cod2.toml           the startup settings (cvars)
+    game_root/          the files of the disc, loose
 ```
+
+`tools/preparar_sd.ps1` ("prepare SD") builds that tree for you, from the built NRO, `app/cod2.toml` and
+`assets/game_root`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\preparar_sd.ps1 -Destino E:\
+powershell -ExecutionPolicy Bypass -File tools\preparar_sd.ps1 -Destino E:\ -Comprobar
+```
+
+`-Destino` is the root of the SD card, or any folder to stage the tree in. The script refuses to write inside the
+repository (5 GB of game data there would be a `.gitignore` problem), checks the free space before it starts, and
+`-Comprobar` only reports what is missing or the wrong size. It copies with `robocopy`, so a copy that is interrupted
+can be resumed by running it again.
+
+Three things that are not obvious:
+
+- **The NRO has to be named `cod2-nx.nro`.** The name is what the Homebrew Menu shows and what a
+  [forwarder](glossary.md#forwarder) looks for.
+- **The game files have to be loose under `game_root/`; the ISO cannot be used.** On the Switch a disc image has to be
+  mapped whole into RAM, because Horizon has no file `mmap`
+  (`sdk/src/core/mapped_memory_switch.cpp`, cap 256 MB), and the game's ISO is about 7 GB. The extracted folder is
+  read with `pread` instead and has no such limit.
+- **`cod2_shaders.nfsp` is not needed by this build.** It belongs to the native shader library, which is parked in
+  `app/src/aparcado/` and not compiled (step 7 above). The NRO draws through the SDK's emulated Xbox 360 GPU, which
+  translates the shaders itself.
 
 `cod2.toml` has the settings read at startup ([cvars](glossary.md#cvar)). The one the installer page gives players is
 `release/cod2.toml` in the [installer's repository](https://github.com/fenndooscar/cod2-nx-installer).

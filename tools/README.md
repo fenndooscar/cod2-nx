@@ -14,7 +14,8 @@ In the order of [docs/building.md](../docs/building.md):
 | `fetch_thirdparty.py` | Fetches the third-party sources of the SDK into `sdk/thirdparty`. The repository only keeps the files this port changed. |
 | `fase1_extraer.py` ("phase 1: extract") | Extracts the Xbox 360 ISO into `assets/game_root` and prints the [XEX](../docs/glossary.md#xex) information. |
 | `codegen.sh` | Runs the code generator (`rexglue codegen`, which translates the game to C++) on an edition tree (`app/`, or the `app_<edition>` copy of another [edition](../docs/glossary.md#edition)), then `llamadas_directas.py` and `copia_literal.py`. |
-| `build.ps1` | Configures and builds the [NRO](../docs/glossary.md#nro) of the default tree (`app/`). |
+| `build.ps1` | Configures and builds the [NRO](../docs/glossary.md#nro) of the default tree (`app/`). The NRO is a POST_BUILD step of the `cod2` target, so the script removes the ELF when the NRO is missing (which forces the relink) and fails if the build still leaves none. |
+| `preparar_sd.ps1` ("prepare SD") | Builds the SD-card tree under `<Destino>\switch\cod2-nx`: the NRO renamed `cod2-nx.nro`, `app/cod2.toml`, and `assets/game_root` copied with `robocopy`. It refuses to write inside the repository, checks the free space first, and `-Comprobar` only reports what is missing or the wrong size. |
 
 ## After every code generation
 
@@ -75,3 +76,8 @@ what the port writes into `app/out/pc/logs/` (`cod2_pc_simbolos.cpp`, `cod2_pc_e
 | `pc/` | The PC-only diagnostics above. Nothing here is built for the Switch. |
 | `switch/cmake/` | The CMake toolchain for devkitA64 and [libnx](../docs/glossary.md#libnx), `switch-devkitA64.cmake`: the file that tells CMake how to compile for the Switch. |
 | `editions/` | Support for the other editions: address matching, tree creation, checks, profile translation, per-edition build ([docs/editions.md](../docs/editions.md)). |
+
+## Getting it onto a Switch
+
+`preparar_sd.ps1` makes the tree, and [docs/building.md](../docs/building.md#8-copy-it-to-the-sd-card) explains what
+each piece is and why the game files have to be loose instead of an ISO.
