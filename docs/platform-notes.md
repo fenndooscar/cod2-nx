@@ -223,6 +223,15 @@ how that driver behaves on the console:
 - **[ZCULL](glossary.md#zcull) is compiled out** of the Switch build of NVK in danfromtico's port. ZCULL (hierarchical
   Z) lets the GPU skip pixels hidden behind others before shading them. See [mesa.md](mesa.md) for what it takes to
   enable it and what it gave.
+- **Ending a render pass costs a round trip of every attachment.** GM20B is tile-based: while a render pass is open the
+  attachments live in the tile buffer, and ending the pass stores all of them to memory while the next begin loads them
+  back. All of this port's passes use `VK_ATTACHMENT_LOAD_OP_LOAD`, so nothing is free. At 1280x720 with depth and a
+  colour target that is megabytes per pass, and the cost is in the passes, not in the pixels: it does not move when the
+  resolution or the shading changes. So a barrier that orders nothing is not a small waste — any pending barrier makes
+  `VulkanCommandProcessor::SubmitBarriers` end the pass. The profiler counts the pass ends per frame for this reason
+  (`pases de render` in the report, counter 33 of `sdk/src/ui/switch_perf.cpp`); if that number is of the same order as
+  the draws per frame, the frame is being cut into a render pass per draw. `sdk/src/graphics/vulkan/render_target_cache.cpp`
+  already carries the SDK's own TODO for the same problem ("avoid stores and loads on tile-based devices").
 
 ## Presentation
 

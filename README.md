@@ -231,7 +231,11 @@ declaring functions inside functions, and one hand-added entry in `app/huecos.to
 
 13. **Bring in-game performance to 30 FPS at 720p.** Measured on the console in handheld mode, from
     `switch-logs/logs-old-1/rex/rex_perfil.log` (47 in-game reports): **3.26 FPS**, and it is the GPU, not the CPU.
-    The evidence, all from the same log:
+    A second session, `switch-logs/logs` (2026-10-11, 14 in-game reports), with the GPU profile and the function
+    ordering in place, reads **5.0–5.8 FPS**, 281–403 draws, 32–60 resolves, 33–60 texture loads and 26–28 MB
+    uploaded per frame, and still **744–774 ms of every second waiting for fences**. The clock alone accounts for
+    3.26 × 460.8/307.2 = 4.89 of that, so the ordering was worth about +10 % on top: real, and nowhere near enough.
+    The evidence, all from the first log:
     - `libnx por segundo` spends **834 ms of every second** waiting for fences (83 % of the wall time), while the
       game's own main thread answers `0 % esperando en el kernel` — it is not blocked, it is spinning on the GPU.
     - A heavy frame takes 306 ms and spends about **255 ms of it inside the GPU**; the emulated GPU's own command
@@ -248,7 +252,20 @@ declaring functions inside functions, and one hand-added entry in `app/huecos.to
        calls, 65.9 texture loads and 28.08 MB of shared memory uploaded per frame** is work the Xbox 360 never did:
        its EDRAM made the resolve and the overdraw free, and this path pays for both. The previous port cut exactly
        this from 60 to 33 ms per frame (one pass instead of tiling, resolves by swapping images, dynamic uniform
-       buffers, ZCULL, cheaper shadow maps) — and it needed the native renderer to do it, which is item 6 above;
+       buffers, ZCULL, cheaper shadow maps) — and it needed the native renderer to do it, which is item 6 above.
+       Two settings the SDK carries and the guest never asked for are already switched off in
+       `app/src/cod2_rendimiento.cpp`: `anisotropic_override = 3`, which overwrites the fetch constant's own
+       anisotropic filtering with 4x on every texture that has mips, and `gamma_render_target_as_unorm16`, which
+       makes a `k_8_8_8_8_GAMMA` target eight bytes per pixel instead of the four the EDRAM holds. A third change
+       is in the SDK's own per-draw path: `VulkanRenderTargetCache::Update` pushed a barrier for every used render
+       target on every update — once per draw in this game — and the barrier was a no-op whenever the target was
+       already in the draw usage, because every field of it had the same source and destination. Any pending
+       barrier makes `SubmitBarriers` end the render pass, and on a tile-based GPU that stores every attachment to
+       memory and loads it back when the next pass begins. The no-op barrier is now skipped; the count of pass
+       ends per frame is in the report so the next session can say what it was worth. The second console session
+       (`switch-logs/logs`, 2026-10-11) added that counter and one more: `N dibujados con barrera de toda la
+       memoria compartida`, the memexport-capable draws whose destination the port cannot narrow down and which
+       cut a pass each;
     3. the guest busy-waits, once 2 fits;
     4. function ordering (done): `app/orden_funciones.ld` held 555 of the other game's addresses and matched nothing.
        It now holds Call of Duty 2's, regenerated with `tools/calientes.py` from `switch-logs/logs-old-1` — the

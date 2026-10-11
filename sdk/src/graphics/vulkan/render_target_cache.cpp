@@ -1500,6 +1500,20 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
         VkImageLayout rt_new_layout;
         VulkanRenderTarget::GetDrawUsage(i == 0, &rt_dst_stage_mask, &rt_dst_access_mask,
                                          &rt_new_layout);
+        if (vulkan_rt.current_stage_mask() == rt_dst_stage_mask &&
+            vulkan_rt.current_access_mask() == rt_dst_access_mask &&
+            vulkan_rt.current_layout() == rt_new_layout) {
+          // The render target is already in the draw usage: the barrier this would push has the same
+          // source and destination on every field, so it orders nothing and transitions nothing.
+          //
+          // Skipping it is not just a saved call. This runs once per render target cache update, which in
+          // this game is about once per draw, and any pending barrier makes SubmitBarriers end the render
+          // pass. On a tile-based GPU ending a render pass stores every attachment to memory and the next
+          // begin loads it back, so a no-op barrier per draw is a full round trip of the tile buffer per
+          // draw. The same reasoning is what the TODO further down this file asks for ("avoid stores and
+          // loads on tile-based devices").
+          continue;
+        }
         command_processor_.PushImageMemoryBarrier(
             vulkan_rt.image(),
             ui::vulkan::util::InitializeSubresourceRange(

@@ -200,17 +200,9 @@ class Cod2App : public rex::ReXApp {
   }
 
  private:
+  // "Only if nobody asked" lives in cod2_rendimiento.cpp, next to the defaults that use it.
   static void PonerSiNadieLoPidio(const char* nombre, const char* valor) {
-    if (rex::cvar::GetFlagInfo(nombre) == nullptr) {
-      REXLOG_DEBUG("Ajuste '{}' no registrado todavia; no lo toco.", nombre);
-      return;
-    }
-    if (rex::cvar::HasNonDefaultValue(nombre)) {
-      return;  // set explicitly: do not override it.
-    }
-    if (rex::cvar::SetFlagByName(nombre, valor)) {
-      REXLOG_DEBUG("Ajuste por defecto de la build portable: {} = {}", nombre, valor);
-    }
+    cod2::rendimiento::PonerSiNadieLoPidio(nombre, valor);
   }
 
   // ==========================================================================

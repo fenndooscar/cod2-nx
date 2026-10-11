@@ -23,10 +23,16 @@ average of the numbers that say which resource is exhausted:
   GPU Cmds       CPU of the renderer thread. Note this is CPU, not GPU use: a low figure with a high
                  "espera ms/s" is a GPU that is busy while its thread waits.
   2o XThread     the busiest other guest thread.
+  pases/fot      render passes the frame ends. On a tile-based GPU each end stores the whole tile buffer
+                 to memory and the next begin loads it back, so this times the attachments is a floor on
+                 the frame's traffic that no shading change can remove.
+  barrera/fot    draws that push a barrier over the whole shared memory buffer, because the port cannot
+                 narrow down where the memexport writes. Each one also cuts the render pass in two.
 
 Reading it: the scene whose "espera ms/s" is near zero is not limited by the GPU, so lowering the
 render resolution cannot help it. The scene with a saturated thread and a saturated GPU is limited by
-both, and there the resolution does matter.
+both, and there the resolution does matter. If "pases/fot" is of the same order as "dib/fot", the frame
+is being cut into a render pass per draw and the cost is in the passes, not in the pixels.
 
 The "dibujados por ancho de superficie" line of each report also shows the width of the surfaces the
 game draws to; 1280-1599 means the guest is rendering at 720p or more.
@@ -74,6 +80,8 @@ def numeros(bloque):
         ("main", r'"Main XThread \(F": CPU ([\d.]+)%'),
         ("gpu", r'"GPU Commands \(F": CPU ([\d.]+)%'),
         ("espera", r"fences consultadas [\d.]+ \([\d.]+ ms\), esperadas [\d.]+ \(([\d.]+) ms\)"),
+        ("pases", r"pases de render: ([\d.]+) finales por fotograma"),
+        ("barrera", r"\| ([\d.]+) dibujados con barrera de toda la memoria compartida"),
     ):
         f = re.search(patron, t)
         d[clave] = float(f.group(1)) if f else 0.0
@@ -114,17 +122,18 @@ def main():
         e.append(d)
 
     cabecera = ("escena", "n", "fps", "CPU%", "dib/fot", "MB/fot", "fallos/s", "espera ms/s",
-                "MainXThread", "GPU Cmds", "2o XThread")
-    print("%-11s %4s %8s %6s %8s %8s %10s %11s %11s %9s %10s" % cabecera)
+                "MainXThread", "GPU Cmds", "2o XThread", "pases/fot", "barrera/fot")
+    print("%-11s %4s %8s %6s %8s %8s %10s %11s %11s %9s %10s %10s %12s" % cabecera)
     for nombre in ("menu", "juego", "cinematica"):
         v = total.get(nombre)
         if not v:
             continue
         n = len(v)
         media = lambda c: sum(x[c] for x in v) / n
-        print("%-11s %4d %8.2f %6.0f %8.1f %8.2f %10.0f %11.0f %10.1f%% %8.1f%% %9.1f%%" % (
+        print("%-11s %4d %8.2f %6.0f %8.1f %8.2f %10.0f %11.0f %10.1f%% %8.1f%% %9.1f%% %10.1f %12.1f" % (
             nombre, n, media("fps"), media("cpu"), media("dib"), media("mb"), media("fallos"),
-            media("espera"), media("main"), media("gpu"), media("otro")))
+            media("espera"), media("main"), media("gpu"), media("otro"), media("pases"),
+            media("barrera")))
     print()
     print("informes leidos: %d (%d s de sesion)" % (informes, informes * 10))
     print("dibujados por ancho de la superficie, medio por escena:")

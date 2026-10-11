@@ -103,7 +103,7 @@ constexpr u64 kReportSeconds = 10;
 constexpr u64 kStartDelayNs = 8000000000ULL;
 constexpr size_t kMaxSamples = 1 << 15;
 constexpr size_t kFrames = 10;
-constexpr unsigned kCounterCount = 33;
+constexpr unsigned kCounterCount = 35;
 // In <NRO folder>/logs/rex/ (switch_crash_hooks.c computes it at startup).
 std::string ReportPath() {
   return std::string(RexSwitchLogDir()) + "rex_perfil.log";
@@ -543,6 +543,15 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
                  "640-1279 %.0f | 256-639 %.0f | menos de 256 %.0f\n",
                  delta(28) / frames, delta(29) / frames, delta(30) / frames, delta(31) / frames,
                  delta(32) / frames);
+    // The two numbers that say whether the cost is per pixel or per pass. A tile-based GPU stores the whole
+    // tile buffer to memory every time a render pass ends and loads it back when the next one begins, so
+    // "finales de pase" times the size of the attachments is a floor on the traffic the frame needs, and it
+    // is traffic no shading change can remove. "barrera entera" is the part of that which comes from
+    // memexport-capable draws whose destination the port cannot narrow down.
+    std::fprintf(f,
+                 "     pases de render: %.1f finales por fotograma (cada uno guarda y recarga el bufer de "
+                 "baldosas) | %.1f dibujados con barrera de toda la memoria compartida\n",
+                 delta(33) / frames, delta(34) / frames);
   }
 
   for (unsigned i = 0; i < kCounterCount; ++i) {
@@ -1057,7 +1066,9 @@ void RexSwitchPerfCount(unsigned id) {
  * 12 render targets transferred, 13 transfer draws, 14 textures loaded,
  * 15 shared memory bytes uploaded, 16 pipelines created, 17 physical memory
  * chunks committed on touch, 18 chunks mapped into a view on touch,
- * 21 clipped audio samples, 22 audio buffers with a peak of 0.98 or more.
+ * 21 clipped audio samples, 22 audio buffers with a peak of 0.98 or more,
+ * 33 render pass ends (tile buffer stored and reloaded), 34 draws with a
+ * whole-shared-memory barrier.
  */
 void RexSwitchPerfAdd(unsigned id, u64 value) {
   if (id < kCounterCount) {

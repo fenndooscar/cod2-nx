@@ -3298,6 +3298,12 @@ void VulkanCommandProcessor::EndRenderPass() {
   if (!in_render_pass_) {
     return;
   }
+#if REX_PLATFORM_SWITCH
+  // Counter 33. On a tile-based GPU ending a render pass stores the tile buffer and beginning one loads it
+  // again, so this is the count of full-attachment round trips to memory per frame. It is here, and not at
+  // the call sites, because this is the only place that actually ends a pass.
+  RexSwitchPerfCount(33);
+#endif
   if (current_render_pass_ == VK_NULL_HANDLE) {
     deferred_command_buffer_.CmdVkEndRendering();
   } else {
@@ -4145,6 +4151,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     // Stream constants can be invalid or dynamic, making the exact destination
     // unknown. Keep synchronization conservative similarly to D3D12 UAV
     // handling for memexport-capable draws.
+#if REX_PLATFORM_SWITCH
+    // Counter 34: a memexport-capable draw whose destination could not be narrowed. Each of these pushes a
+    // barrier over the whole shared memory buffer and, with it, cuts the render pass.
+    RexSwitchPerfCount(34);
+#endif
     shared_memory_->Use(VulkanSharedMemory::Usage::kGuestDrawReadWrite,
                         std::make_pair(0u, SharedMemory::kBufferSize));
   } else {
