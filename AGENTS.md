@@ -27,8 +27,8 @@ The same applies to `docs/`: the documents were written for the other game. `doc
    of it; if `git status` shows one of those paths, fix the ignore rule — do not commit it.
 2. **Never `git add -f`** anything under an ignored path. If a file looks like it should be tracked, check
    `.gitignore` and the reason it is there before overriding it.
-3. **`sdk/thirdparty` tracks exactly seven files** — the ones this port changed
-   (`CMakeLists.txt`, the three FFmpeg configs, two FFmpeg templates, `ffmpeg-overlay/codec_list.c`). Everything else
+3. **`sdk/thirdparty` tracks exactly eight files** — the ones this port changed
+   (`CMakeLists.txt`, the four FFmpeg configs, two FFmpeg templates, `ffmpeg-overlay/codec_list.c`). Everything else
    arrives through `tools/fetch_thirdparty.py`. Do not commit the ~19,000 vendored files; `.gitignore` exists
    specifically to prevent it.
 4. **Do not add a dependency.** The Switch build is a static NRO with a hard memory limit, and the SDK vendors its

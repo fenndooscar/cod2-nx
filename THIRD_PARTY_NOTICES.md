@@ -45,9 +45,10 @@ Libraries used by the SDK, the NRO and the code generator, fetched from the subm
 This port modifies these files of the SDK's third-party tree; the modified copies are in `sdk/thirdparty`:
 
 - `FFmpeg/libavcodec/fft_template.c` and `FFmpeg/libavcodec/mdct_template.c`
-- `FFmpeg/config.h`, plus `FFmpeg/config_switch_aarch64.h` and `FFmpeg/config_cod2_wmv3.h` (new): the configuration
-  for AArch64 Horizon and for a build limited to the WMV3 decoder
-- `ffmpeg-overlay/codec_list.c`: registers the WMV3 decoder
+- `FFmpeg/config.h`, plus `FFmpeg/config_switch_aarch64.h`, `FFmpeg/config_cod2_wmv3.h` and `FFmpeg/config_cod2_bink.h`
+  (all new): the configuration for AArch64 Horizon, for a build limited to the WMV3 decoder, and for the Bink decoder
+  the game's own cutscenes need
+- `ffmpeg-overlay/codec_list.c`: registers the WMV3 and Bink decoders
 - `CMakeLists.txt`: builds the libraries for the Switch
 
 The rest of FFmpeg and libmspack is the unmodified upstream source at the commits pinned by ReXGlue SDK v0.10.0.

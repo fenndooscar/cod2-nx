@@ -32,3 +32,6 @@
 
 /* COD2: components of the cutscene WMV3 decoder. */
 #include "config_cod2_wmv3.h"
+
+/* COD2: the Bink decoder for Call of Duty 2's own cutscenes. */
+#include "config_cod2_bink.h"

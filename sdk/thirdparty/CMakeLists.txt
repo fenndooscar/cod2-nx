@@ -424,7 +424,17 @@ endif()
 # =============================================================================
 # FFmpeg - Audio/video codec library (for XMA decoding)
 # Only builds libavutil and libavcodec needed for WMA Pro decoding
-# COD2: also the WMV3 decoder for the cutscenes (config_cod2_wmv3.h)
+# COD2: also the WMV3 decoder (config_cod2_wmv3.h) and the Bink decoder
+# (config_cod2_bink.h) for the cutscenes
+#
+# The overlay below is not a convenience: the vendored FFmpeg source tree ships
+# a stale generated libavcodec/codec_list.c, from the Xenia configure that
+# produced it, which lists only the five audio codecs. allcodecs.c does
+# #include "libavcodec/codec_list.c", so that stale file wins unless the overlay
+# directory comes FIRST on the include path - which is why the
+# target_include_directories for libavcodec below is marked BEFORE. Dropping
+# BEFORE silently unregisters every video decoder: avcodec_find_decoder returns
+# NULL and the port falls back to the guest's own decoder with no error.
 # =============================================================================
 
 set(FFMPEG_DIR "${CMAKE_CURRENT_SOURCE_DIR}/FFmpeg")
@@ -596,6 +606,8 @@ add_library(libavcodec STATIC
     ${FFMPEG_DIR}/libavcodec/bitstream.c
     ${FFMPEG_DIR}/libavcodec/bitstream_filter.c
     ${FFMPEG_DIR}/libavcodec/bitstream_filters.c
+    ${FFMPEG_DIR}/libavcodec/bink.c
+    ${FFMPEG_DIR}/libavcodec/binkdsp.c
     ${FFMPEG_DIR}/libavcodec/bsf.c
     ${FFMPEG_DIR}/libavcodec/codec_desc.c
     ${FFMPEG_DIR}/libavcodec/codec_par.c
