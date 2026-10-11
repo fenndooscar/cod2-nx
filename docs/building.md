@@ -154,6 +154,12 @@ from where you run the command. On Windows use `$PWD` from Git Bash, or the full
 
 The result is `app/out/sw8/cod2.nro`. Rename it to `cod2-nx.nro` when you copy it to the SD card (step 8).
 
+`cod2.nro` is not a ninja output: it is a POST_BUILD step of the `cod2` target, so `cmake --build` only regenerates it
+when it relinks the ELF. If the ELF is already up to date and you deleted the NRO, `ninja` reports `no work to do`,
+the build succeeds, and no NRO appears. `tools/build.ps1` handles this by removing the ELF when the NRO is missing, and
+it fails with `the build left no app/out/sw8/cod2.nro` if the build still leaves none. If you build by hand and the NRO
+is missing, delete `app/out/sw8/cod2` and build again.
+
 Build options, in `app/CMakeLists.txt`:
 
 | Option | Normally | What it does |

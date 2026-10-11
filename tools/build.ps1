@@ -35,5 +35,10 @@ if (-not (Test-Path "$out/CMakeCache.txt")) {
         "-DREXGLUE_SWITCH_NVK_SDK=$MesaSdk", "-DCOD2_PGO=$Pgo", '-DCOD2_BUILD_LAUNCHER=OFF')
 }
 $start = Get-Date
+# The NRO is not a ninja output: it is a POST_BUILD step of the `cod2` target, so `ninja` only regenerates it when it
+# relinks. With the ELF already up to date, deleting cod2.nro and rebuilding did nothing, printed "Built ... in 0 min"
+# and left no NRO. Removing the ELF makes ninja relink and run the step again.
+if (-not (Test-Path "$out/cod2.nro")) { Remove-Item -Force "$out/cod2" -ErrorAction SilentlyContinue }
 Invoke-CMake 'build' @('--build', $out, '-j', "$Jobs")
+if (-not (Test-Path "$out/cod2.nro")) { throw "the build left no $out/cod2.nro" }
 Write-Output "Built $out/cod2.nro in $([int]((Get-Date) - $start).TotalMinutes) min"

@@ -13,9 +13,11 @@ recompilation with [ReXGlue](https://github.com/rexglue/rexglue-sdk).
 > **The port runs.** This repository is a hard fork of [nfsmw-nx](https://github.com/StevensND/nfsmw-nx) at commit
 > `4e3ffc24fe80285189f2cea601606c529d5f1b97`, with the identifiers and file names renamed from `nfsmw` to `cod2`.
 > Call of Duty 2's `default.xex` has been translated with ReXGlue, and the translated program runs on Windows: it
-> starts, mounts the game root, brings up D3D12, input and audio, loads its data and draws. **The Switch NRO now
-> builds too** (`app/out/sw8/cod2.nro`, 44 MB) against a Mesa/NVK SDK built from this repository's patch. What is
-> *not* verified is the game running on the console, and gameplay as opposed to the menu — see "Not done".
+> starts, mounts the game root, brings up D3D12, input and audio, plays its four startup cutscenes, reaches the main
+> menu, loads campaign levels, saves and returns to the menu, and keeps the campaign's progress across a restart.
+> **The Switch NRO now builds too** (`app/out/sw8/cod2.nro`, 44 MB) against a Mesa/NVK SDK built from this
+> repository's patch. What is *not* verified is the game running on the console, and gameplay as opposed to the menu —
+> see "Not done".
 > Everything that names an address, a hook or a measured number is still being re-derived from this game's own
 > `default.xex`; treat any value inherited from the fork as a checklist of *what to look for*, not as an answer.
 
@@ -150,6 +152,21 @@ Done and verified on Windows (see [docs/building.md](docs/building.md)):
   devkitPro's own MSYS2 `make`, and working around it by pointing the switch winsys at the **drm** winsys' `nouveau.h`
   compiles but links objects into the wrong list; and `sdk/cmake/rexglue_switch.cmake` no longer names `zstd`, which
   devkitPro does not package and which `nm --undefined-only` proves nothing in the link needs.
+- **Found why the campaign kept falling back to the first mission, and fixed it.** After finishing a mission the game
+  returned to the menu and offered mission one again. The checkpoint in `savegame.svg` was never the problem: the
+  campaign's progress is a **profile** setting, `63E83FFE`, holding `set mis_01 … mis_10` and `mis_difficulty`, and it
+  was being dropped on the way in. `XamUserWriteProfileSettings` skips a record whose `type` byte is `UNSET`, and the
+  game never writes that byte: it fills only `from`, `user_index`, `setting_id`, `binary.size` and `binary.ptr`, so a
+  perfectly good 384-byte record arrived with `type = 0xFF` and a real length and pointer. The guard in
+  `sdk/src/kernel/xam/xam_user.cpp` now only drops a record with **no length and no pointer**, and promotes the rest to
+  `BINARY`. Verified on the game's own path: the mission after the first writes `G_WriteGame 'tankhunt'` and the profile
+  file then reads `set mis_01 "10"` / `set mis_02 "1"`, where before the fix no `63E83FFE` file was written at all.
+  `app/src/cod2_consola.cpp` (new, gated on `cod2_consola`) hooks the seven functions on that path and logs what the
+  game writes, which is how the record was caught.
+- **Fixed `tools/build.ps1` reporting a build it had not done.** `cod2.nro` is a POST_BUILD step of the `cod2` target,
+  not a ninja output, so once the ELF is up to date `ninja` has nothing to do: deleting the NRO and rebuilding printed
+  `Built … in 0 min` and left no NRO at all. The script now removes the ELF when the NRO is missing, which forces the
+  relink and the step, and fails loudly if the build still leaves no NRO.
 
 Not done, in the order they have to happen:
 
@@ -162,22 +179,26 @@ Not done, in the order they have to happen:
    this game's own generated code with `tools/huecos.py` and checked with `tools/comprobar_huecos.py`.
 5. **Find out what the game is drawing.** It is further along than the last note here claimed, and the earlier
    "smooth gradient" reading was wrong: it came from analysing a capture that was never checked against the window's
-   own pixels. What is measured now, from the runtime's own log and from the file system:
-   - The game **walks the whole startup movie sequence** — `legal.bik`, `atvi.bik`, `IW_logo.bik`, `cod2_intro.bik`,
-     `cod2_attract.bik` — and then **loads real levels**: `movie_eastern_load.ff` + `movie_eastern.ff`, and
-     `moscow_load.ff` + `moscow.ff` (the first campaign mission). A run that was sent keystrokes instead loaded
-     `demolition.ff`, a multiplayer map. So it gets past the movies, reacts to input and streams level data.
-   - It streams **~110 MB per 15 s continuously, and 100 % of it is re-reads** of ranges already read
-     (`rangos: 915 releidas de 918 (100 %)`). That is either the attract loop or a level loader with no working
-     cache; `cod2_io_rangos_mb` is 64 and reports `0 entradas vivas`, so the range cache is not catching these
-     (3075 reads fall under the 256 KB floor and are not cached at all). Worth fixing before blaming the renderer.
-   - The window is 2560x1440 and renders a **structured scene**, not noise: local block std of 25+ over most of the
-     lower half, `|pixel − neighbour|` around 2.4, and `tools/pc/mapa.py` shows a bright region top-right with a
-     large bright mass along the bottom. No legible text has been found in a full-resolution crop yet.
+   own pixels. What is measured now, from the runtime's own log, from the file system and from captures of the window:
+   - The game **plays the whole startup movie sequence** — `legal.bik`, `atvi.bik`, `IW_logo.bik`, `cod2_intro.bik` —
+     and then reaches the **main menu**, where the attract loop opens `cod2_attract.bik`. It reacts to input and
+     streams level data: a run that was sent keystrokes loaded `demolition.ff` (a multiplayer map) and the ordinary
+     startup reaches `moscow.ff`, the first campaign mission. Captures of the window during `cod2_intro.bik` show the
+     real cutscene, not noise: consecutive frames differ over 89–99 % of their pixels at 3 s apart and over 73–100 %
+     at 250 ms apart, and the frames carry the intro's own title cards.
+   - **The `…bik` files are the source of those frames.** Renaming `cod2_intro.bik` out of `assets/game_root` makes the
+     run log `FAILED: path='D:\cod2_intro.bik' -> 0xc000000f` and never reaches the menu. The guest contains its own
+     Bink player: `Not a Bink file.` (`0x82066FA4`), `Error reading Bink header.` (`0x82066FFC`), `Error opening file.`
+     (`0x82066F90`) and `The file doesn't contain any compressed frames yet.` (`0x82066FB8`), referenced from
+     `sub_82496B20` and `sub_8232C848`. So item 8 below is about the port's *own* decode path, not about whether the
+     movies play.
+   - It streams about **20 MB per 15 s and it is all first reads**: `rangos: 0 releidas de 324 (0 %); 324 seguidas
+     (100 %)`. The earlier `915 releidas de 918 (100 %)` figure came from a run that had been sent keystrokes into a
+     level; on the ordinary startup path there is nothing to fix here.
    - The game's own `Com_Error` buffer (`0x83D45480`, read with `tools/pc/vigilar_error.py`) held
      `Game session no longer available` in one run and stayed empty for the first 25 s of another, so it is written
      late, not at startup. Nothing of it reaches the port's log.
-   Next: identify the scene by reading the game's console, not by guessing from pixels.
+   Next: identify what the *level* is drawing — the menu and the movies are accounted for, the in-level scene is not.
 6. **Replace the app's game-specific code** (`app/src/cod2_*.cpp`): the hooks, the D3D trace, the native renderer,
    the audio server — all of it is still the other game's, and it is parked in `app/src/aparcado/` rather than
    compiled.
@@ -185,15 +206,15 @@ Not done, in the order they have to happen:
    Switch with homebrew enabled. The SD card layout it expects is `sdmc:/switch/cod2-nx/` (see
    [docs/building.md](docs/building.md)).
 8. **Add a Bink path** over FFmpeg for the cutscenes, and the matching FFmpeg decoders
-   (`sdk/thirdparty/FFmpeg/config_cod2_wmv3.h` is still a WMV3 configuration). This is **not** optional polish any
-   more: the game opens five `.bik` files in sequence before it reaches anything else (step 5 above), so the movie
-   path sits on the critical path to the main menu.
+   (`sdk/thirdparty/FFmpeg/config_cod2_wmv3.h` is still a WMV3 configuration). The game already plays its movies
+   through its own Bink player, so this is for replacing that path, not for unblocking the menu.
 9. **Unpack the `.ff` fastfiles** before scanning for shader containers, then build `cod2_shaders.nfsp`.
 10. **Record a PGO profile** on the console.
-11. **Write the missing `XamUserWriteProfileSettings` setting types.** The port logs
-    `XamUserWriteProfileSettings: Unimplemented data type 189` (`sdk/src/kernel/xam/xam_user.cpp`, which handles only
-    `CONTENT` and `BINARY`); 189 is outside the SDK's `Setting::Type` enum, so the value has to be read out of this
-    game's own `default.xex` before it can be given a meaning.
+
+~~11. Write the missing `XamUserWriteProfileSettings` setting types.~~ Not a real gap: the
+`Unimplemented data type 189` line that used to be quoted here appears in no log this port has produced, and the
+`default:` branch that would print it is only reached for a type outside the enum. The type byte the game leaves
+unset was the campaign bug fixed above, and it is handled.
 
 ~~12. Clear the nine unresolved branches.~~ Done: `app/codegen.log` reports zero. The cause was `dataPointerScan`
 declaring functions inside functions, and one hand-added entry in `app/huecos.toml`; both are fixed.
