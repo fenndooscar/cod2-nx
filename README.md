@@ -307,11 +307,23 @@ declaring functions inside functions, and one hand-added entry in `app/huecos.to
        SDK's own TODO above `PerformTransfersAndResolveClears` asks for exactly that ("perform all non-cross-copying
        transfers for the current framebuffer configuration in a single pass, to load / store only once"). The
        transfer line also separates the calls made by the guest's resolve command (counter 41) from those made by
-       binding a render target as a texture, because the two have different fixes. The arithmetic to beat: at 4.86
-       FPS a frame is 206 ms, 141.9 passes of colour plus depth attachment are 21 MB of store and 21 MB of load
-       each at the full EDRAM area (7 MB each once the render area is the guest's 720), and the handheld memory bus
-       moves 34.1 GB/s, so 141.9 × 42 MB / 34.1 GB/s = 175 ms — the passes are the frame. Reaching 33 ms needs the
-       pass count or the bytes per pass down by about five times, and this split says which of the two to attack;
+       binding a render target as a texture, because the two have different fixes.
+
+       The arithmetic to beat, and what it says about the plan. At 4.86 FPS a frame is 206 ms. One pass over a
+       1280-wide target stores and loads 21 MB of attachment (10.5 of colour and 10.5 of depth) while the render
+       area is the whole EDRAM allocation, and 7 MB once it is the guest's 1280×720; the handheld memory bus moves
+       34.1 GB/s at the clocks this port asks for. So 141.9 × 42 MB / 34.1 GB/s = **175 ms** before the render area
+       is narrowed and 141.9 × 14.7 MB / 34.1 GB/s = **61 ms** after. Two things follow. First, the render-area
+       change of point 5 is worth up to about three times, and if the console says otherwise the change is not
+       reaching the passes. Second, and more important, 61 ms is not 206 ms: **even with the pass traffic gone
+       entirely the frame would be about 10 FPS, so the passes alone cannot be the whole story and the next round
+       must not be chosen on the assumption that they are.** The two ways to find out which term is really the wall
+       need no build: play the same spot with `cod2_area_de_dibujo_ajustada` at its default and then `false` and
+       compare `area MB/f` against the frame rate, and hold L+R+ZL in game to make the profiler remove one part of
+       the GPU work per report (`sin dibujados`, `sin transferencias`, `sin resolves`, `sin cargas de texturas`, …,
+       `sin nada`), where `sin nada` against `normal` is the whole cost of the GPU work and a `sin nada` that is
+       just as slow as `normal` means the cost is not in the work at all. `tools/perfil_consola.py` reads those
+       reports in a table of their own. See [docs/measuring.md](measuring.md#splitting-a-frame-that-is-cut-into-render-passes);
     6. the guest busy-waits, once the GPU work fits;
     7. function ordering (done): `app/orden_funciones.ld` held 555 of the other game's addresses and matched nothing.
        It now holds Call of Duty 2's, regenerated with `tools/calientes.py` from `switch-logs/logs-old-1` — the

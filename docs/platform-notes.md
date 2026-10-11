@@ -256,8 +256,11 @@ how that driver behaves on the console:
   allocation (10.49 MB of colour plus 10.49 MB of depth) and **7 MB** once the render area is the guest's 1280x720.
   Measured in game: 141.9 passes per frame at 4.86 FPS. 141.9 x 21 MB x 2 (store and load) / 34.1 GB/s = **175 ms**
   of a 206 ms frame — the model is the measurement. With the render area narrowed it predicts 141.9 x 7 x 2 /
-  34.1 GB/s = 58 ms, so the render area is worth about 3x and nothing more; getting to 33 ms (30 FPS) needs the
-  number of passes or the bytes per pass cut again, and that is what the pass reasons below are for.
+  34.1 GB/s = **61 ms**, so the render area is worth about three times and no more. Note what that leaves: 206 −
+  175 + 61 = 92 ms of frame that is *not* pass traffic, and 33 ms (30 FPS) is less than 61 ms, so even making the
+  passes free would not reach it. The passes are the largest single term and the only one a change in the port can
+  remove, but the next round has to check the other terms too rather than assume the passes are everything — which
+  is what the pass reasons and the skip rotation below are for.
 - **Why a pass ended is a separate question from what it cost, and it is the one that decides the next change.**
   `VulkanCommandProcessor::EndRenderPass` takes a reason and the profiler keeps one counter per reason (36–39:
   the next pass has a different destination, pipeline barriers had to be recorded, a caller asked for the end with
