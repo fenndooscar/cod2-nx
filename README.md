@@ -239,8 +239,8 @@ declaring functions inside functions, and one hand-added entry in `app/huecos.to
       `sub_8237FD08`. That is 190 % of a core doing nothing, and it buys no frames while the GPU is the wall — the
       previous port only found these worth replacing once the GPU fitted in the budget.
 
-    What is left, in the order the previous port had to do it (`docs/performance-history.md` steps 2–5), and the first
-    one is already in:
+    What is left, in the order the previous port had to do it (`docs/performance-history.md` steps 2–5). Points 1 and 4
+    are already in:
     1. the GPU profile (done, above): 307.2 → 460.8 MHz, +50 % of GPU;
     2. the GPU work itself, which is the real wall. 424 draws, **65.9 resolves (6.35 screens of area), 437 transfer
        calls, 65.9 texture loads and 28.08 MB of shared memory uploaded per frame** is work the Xbox 360 never did:
@@ -248,8 +248,15 @@ declaring functions inside functions, and one hand-added entry in `app/huecos.to
        this from 60 to 33 ms per frame (one pass instead of tiling, resolves by swapping images, dynamic uniform
        buffers, ZCULL, cheaper shadow maps) — and it needed the native renderer to do it, which is item 6 above;
     3. the guest busy-waits, once 2 fits;
-    4. function ordering: `app/orden_funciones.ld` still names 555 of the other game's addresses and matches nothing,
-       so it is inert. Regenerating it with `tools/calientes.py` against a console log of *this* game is free FPS.
+    4. function ordering (done): `app/orden_funciones.ld` held 555 of the other game's addresses and matched nothing.
+       It now holds Call of Duty 2's, regenerated with `tools/calientes.py` from `switch-logs/logs-old-1` — the
+       session that reaches a level — against the ELF of the same build. Getting there needed two silent failures
+       fixed: the linker matches by section name and ignores what it does not find, and a recompiled function's
+       body is not always in the section named after the symbol the profile reports (a hook in `app/src` gives the
+       bare name a body of its own). The tool now writes both names and checks each against the ELF's symbol table,
+       and `tools/comprobar_orden.py` reads the link map to confirm the entries landed: 1009 of 1015 functions are
+       in the hot region, against 388 of 1005 for the inherited list. It is the one change of the previous port's
+       step 6 that needed no console session of its own.
 
     Before optimising anything here, read [docs/measuring.md](measuring.md): the `tijera … pantallas` counter is the
     sum of every draw's scissor rectangle, not the pixels shaded, so it is an upper bound of an upper bound and cannot

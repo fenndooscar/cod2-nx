@@ -25,6 +25,8 @@
      [Function ordering](#function-ordering)).
    - `tools/comprobar_clave_textura.py` ("check texture key") checks one piece of compiled code in the final program
      (see [the xxHash pitfall](#an-lto-and-pgo-pitfall-strict-aliasing-in-xxhash)).
+   - `tools/comprobar_orden.py` ("check order") checks against the link map that the functions
+     `app/orden_funciones.ld` lists were really placed (see [Function ordering](#function-ordering)).
    - The number of installed [hooks](glossary.md#hook) must be the same as in the build you started from.
 
 ## CMake on Windows
@@ -169,6 +171,23 @@ instruction" can break the start-up.
 
 With `memcpy` at 0x140, `addr2line` gives wrong names for addresses near zero. Below 0x3000, translate addresses with
 `objdump -d`, or with `nm -S` showing only code symbols.
+
+**The second trap: which of a function's two names owns its section.** Every recompiled function has two symbols —
+`sub_8228E820`, the name its guest address is known by and the one a [hook](glossary.md#hook) replaces, and
+`__imp__sub_8228E820`, the generated body. The ordering file names *sections*, so it has to name the symbol the body
+was emitted under, and that is not always the same one:
+
+- a function nothing hooks has its body under `__imp__sub_X`, with `sub_X` as an alias of it. `DEFINE_REX_FUNC` says
+  so in [cod2_pch.h](../app/generated/default/cod2_pch.h): "`__imp__##name` as the entry and the bare name as its
+  weak alias";
+- a function a hook in `app/src` replaces has a real `sub_X` of its own, and then the two are different addresses and
+  different sections.
+
+Listing the wrong one places nothing, and the linker says nothing: it is the same silent failure as trap 1. The first
+regeneration of this list for Call of Duty 2 named only `sub_X` and got 66 of 1015 functions wrong — every one of
+them a function the codegen had emitted, which is to say the game's own code, the code the list exists for. The tool
+now writes both names, and `tools/comprobar_orden.py` reads the link map and reports which entries the link actually
+placed, so the next list does not have to be trusted.
 
 ## An LTO and PGO pitfall: strict aliasing in xxHash
 

@@ -166,7 +166,7 @@ Build options, in `app/CMakeLists.txt`:
 |---|---|---|
 | `COD2_LTO` | ON | Optimizes the translated code and the app as a whole at the end of the build ([LTO](glossary.md#lto)). It uses 2 jobs (`-flto=2`), because more do not fit in 16 GB of RAM. |
 | `COD2_PGO` | empty | `usar` ("use") builds with the recorded profile in `pgo/<edition>`. `generar` ("generate") builds a special NRO that records a new profile. **There is no profile for this game yet**, so leave it empty (see below). |
-| `COD2_ORDEN_FUNCIONES` | ON | Puts the functions that run most at the start of the program (list in `app/orden_funciones.ld`), which makes them faster to fetch. |
+| `COD2_ORDEN_FUNCIONES` | ON | Puts the functions that run most at the start of the program (list in `app/orden_funciones.ld`), which makes them faster to fetch. It also makes the link write `cod2.map` next to the ELF, which is what `tools/comprobar_orden.py` reads to check that the list did something: the linker ignores an entry it cannot match, silently. |
 
 The icon for the Homebrew Menu is not included. Put a 256x256 JPEG at `tools/switch/icono/cod2_icono.jpg`, or the
 NRO gets libnx's default icon.

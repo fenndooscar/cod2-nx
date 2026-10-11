@@ -165,15 +165,20 @@ if(REXGLUE_PLATFORM_SWITCH)
     # only changes where each function is placed (-ffunction-sections already gives one section per
     # function). The list comes from stack sampling on the console.
     #
-    # ORDERING DOES NOTHING UNTIL THE LIST IS REBUILT FOR THIS GAME. app/orden_funciones.ld still holds
-    # Need for Speed: Most Wanted's function addresses, and it matches by mangled symbol name, so every
-    # entry in it silently matches nothing here (see README.md, trap 1). It is harmless (the linker just
-    # finds no such symbol) but it is also useless; the real list has to come from tools/calientes.py on a
-    # profile recorded on the console.
+    # The list is Call of Duty 2's: regenerated with `tools/calientes.py <rex_perfil.log> <cod2.elf> <out.txt>
+    # app/orden_funciones.ld` from switch-logs/logs-old-1, the session that reaches a level. Before that it
+    # held Need for Speed: Most Wanted's addresses, which matched nothing here. Note that it matches by
+    # mangled symbol name, so a name that does not exist is silently ignored: a wrong list is not a build
+    # error, it is a change that does nothing (see README.md, trap 1). The tool checks each name against
+    # the ELF's symbol table for that reason.
     option(COD2_ORDEN_FUNCIONES "Juntar las funciones calientes al principio de .text" ON)
     if(COD2_ORDEN_FUNCIONES)
+        # The map is not for the build: it is the only place where the section names the ordering file asks for
+        # and the ones the link actually produced can be compared. A pattern that matches nothing is silent
+        # (README.md, trap 1), and this is what tools/comprobar_orden.py reads to catch that.
         target_link_options(cod2 PRIVATE
-            "-Wl,--section-ordering-file,${CMAKE_CURRENT_SOURCE_DIR}/orden_funciones.ld")
+            "-Wl,--section-ordering-file,${CMAKE_CURRENT_SOURCE_DIR}/orden_funciones.ld"
+            "-Wl,-Map,${CMAKE_BINARY_DIR}/cod2.map")
         set_property(TARGET cod2 APPEND PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/orden_funciones.ld")
     endif()
     # Homebrew menu icon: a 256x256 JPEG, as elf2nro expects. It is not distributed with the sources;
