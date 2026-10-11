@@ -9,7 +9,6 @@ analysis had to be thrown away, because a number did not mean what it seemed to 
 that held up and the mistakes to avoid.
 
 ## In short
-
 - Measure on the console, at stock clocks. Numbers from the PC or from an overclocked console mislead.
 - To compare two versions, alternate between them every few seconds inside the same session, and check the noise
   with a setting that does nothing.
@@ -17,6 +16,9 @@ that held up and the mistakes to avoid.
 - Before you trust a counter, read the code that increments it.
 - Look at the share of slow frames and at the range of [frame times](glossary.md#frame-time), not only at the
   average: the player feels the variation.
+- A frame that is cut into many render passes is the first thing to suspect on a tile-based GPU, but "the passes"
+  is not one thing: separate what each pass cost from why it ended and from what it was for, and then run the A/B
+  that says whether the passes are the wall at all (see "Splitting a frame that is cut into render passes").
 
 ## Ground rules
 
@@ -122,6 +124,40 @@ tells how long the GPU work in between took.
 11. **Stopwatches cost time.** Timing every ring packet and every draw stage meant about 50,000 clock reads per frame:
     close to a quarter of the ring thread's CPU on the PC. On busy code, time only a sample (today one in 128 packets,
     and one in 8 or 64 draws depending on the timer) and scale the result.
+
+## Splitting a frame that is cut into render passes
+
+This port ends about 140 render passes per frame for about 330 draws, and on a tile-based GPU every one of those
+stores the attachments to memory and loads them back when the next one begins. That makes the passes the first
+thing to suspect, but "the passes" is not one thing, and the counters have to separate them before a change is
+chosen:
+
+1. **What a pass cost.** Counter 35 (`area MB por fotograma`) is the attachment pixels the passes cover, four bytes
+   each, colour only. Times the passes per frame it is the frame's floor of attachment traffic, which no change in
+   shading can remove. The setting `cod2_area_de_dibujo_ajustada` is what moves it, because a render target image
+   is as tall as the EDRAM allocation (2048 rows for a 1280-wide one) and not as tall as the image the guest draws
+   into (720). A pass at the full allocation costs 10 MB of colour and 10 MB of depth, one at the guest's area 3.5
+   and 3.5.
+2. **Why a pass ended.** Counters 36-39, printed as `pases por motivo`. Two of the four reasons are the port's own
+   work and not the guest's, and those are the ones a change in the port can remove without changing what the game
+   draws. Counter 40 counts the guest's occlusion queries, each of which ends the pass twice for reasons that have
+   nothing to do with the attachments.
+3. **What a pass was for.** Counters 42-45, printed as `pases por clase`. This is the split that decides *who* can
+   remove them: the `dibujados` half is the guest's drawing and only drawing less removes it, the `transferencias`
+   half is the port copying render target contents out so they can be sampled as textures, which the Xbox 360's
+   EDRAM made free. Summing the two and comparing with `pases/fot` also shows whether the frame leaves passes open
+   at the end.
+4. **The A/B that decides whether any of it is the wall.** Play the same spot twice in one session, once with
+   `cod2_area_de_dibujo_ajustada` at its default and once with it `false`, and compare `area MB/f` and the frame
+   rate. If turning the area off costs the predicted 2.8x of attachment traffic and the frame rate barely moves,
+   the frame is not bandwidth-bound by the passes and the next change belongs somewhere else — which is the answer
+   that matters, because it is the one that stops the next round from being another blind guess. Do not read the
+   frame rate of one run alone: the game's own scene changes more than the change under test does.
+5. **What is still missing: per-pass GPU time.** Nothing here says whether the frame is bound by the passes'
+   bandwidth or by the pixels the draws shade; the scissor counter (counter 6) is the sum of every draw's scissor
+   rectangle without clipping, so it is an upper bound of an upper bound. That needs `vkCmdWriteTimestamp` at the
+   pass boundaries, read back a frame later, with the scale of the section above — the parked native renderer
+   (`app/src/aparcado/cod2_nativo_destinos.cpp`) has a working implementation to copy the plumbing from.
 
 ## Verifying a change
 
