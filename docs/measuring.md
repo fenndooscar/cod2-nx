@@ -39,10 +39,12 @@ that held up and the mistakes to avoid.
 - **A thread that is busy is not necessarily working.** Main XThread of Call of Duty 2 spends 92 % of its time on a
   single three-instruction loop inside `sub_823800D8`, spinning on a guest flag. That is 100 % of a core and none of
   it is progress. Before calling the CPU the bottleneck, read what the busy thread is executing.
-- **Only compare the same kind of load.** Menus and loading screens cost half of what driving costs. Averaging a
-  whole session inflated the frame rate by almost two frames per second. Use only the intervals of the race where
-  the car is moving, and weight them by frames. When two sessions ran over different parts of the map, re-weight them
-  by load (for example, by groups of draws per frame).
+- **Only compare the same kind of load.** A menu costs a fraction of what a level costs. Averaging a whole session
+  inflated the frame rate by almost two frames per second. Use only the intervals of the level where the player is
+  actually moving, and weight them by frames. When two sessions ran over different parts of the level, re-weight them
+  by load (for example, by groups of draws per frame). `tools/perfil_consola.py` splits the reports into cutscene, menu
+  and game for this reason: on the Call of Duty 2 sessions the same build measured 26.2 FPS in the menu, 3.3 in a level
+  and 0.5 in a cutscene, and the three numbers describe three different programs.
 
 ## A/B tests that can be trusted
 

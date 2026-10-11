@@ -174,7 +174,9 @@ Done and verified on Windows (see [docs/building.md](docs/building.md)):
   `RexSwitchApmPedirGpuMhz` / `RexSwitchApmAplicar` from `OnPostInitLogging` and asks for the official handheld profile
   `0x92220008` — GPU 460.8 MHz with the memory left at 1331.2 MHz — which is what the previous port did in its own step
   5. It is not an overclock: it goes through `apm`, the same service any commercial game uses. `cod2_switch_gpu_mhz = 0`
-  in `cod2.toml` leaves the console alone, and the next report says which clock really came in.
+  in `cod2.toml` leaves the console alone, and the next report says which clock really came in. The two 460.8 profiles
+  are tried in order, the one that respects the memory first; `cod2_switch_ram_1600` (on) only decides what to do on a
+  firmware that has the other one alone, and never forces 1600 by itself.
 
 Not done, in the order they have to happen:
 

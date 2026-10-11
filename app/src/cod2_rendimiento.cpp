@@ -15,10 +15,12 @@
 //   overclock: no KIP and no sysmodule is touched, and if the firmware does not have the configuration
 //   apm returns an error and changes nothing. 307.2 -> 460.8 is +50 % of GPU.
 //
-//   The memory clock is deliberately left alone: the high-GPU configurations come in two flavours, with
-//   EMC 1331.2 (0x92220008) and with EMC 1600 (0x92220007), and the first one is the one wanted. Raising
-//   the RAM costs battery and heat; cod2_switch_ram_1600 accepts that trade if this firmware turns out to
-//   have only the second.
+//   The memory clock is left alone unless it is the only way: the high-GPU configurations come in two
+//   flavours, with EMC 1331.2 (0x92220008) and with EMC 1600 (0x92220007), and RexSwitchApmAplicar tries
+//   them in that order and keeps the first that works. cod2_switch_ram_1600, on by default, is what decides
+//   what happens when the firmware has only the second: on, the GPU clock is taken and the RAM goes to 1600
+//   with it; off, nothing is changed at all and the port stays at 307.2 MHz. It does not force 1600 by
+//   itself, so it costs no battery on a console that has both.
 //
 // WHY IT WAS NOT THERE
 //   It lived in src/aparcado/cod2_ajustes_graficos.cpp, parked along with the inherited native renderer.
@@ -45,10 +47,11 @@ REXCVAR_DEFINE_INT32(cod2_switch_gpu_mhz, 460, "Graficos",
                      "460,8 MHz es un perfil oficial de Horizon, no un overclock; gasta mas bateria y calienta mas")
     .allowed({"0", "384", "460"});
 
-REXCVAR_DEFINE_BOOL(cod2_switch_ram_1600, false, "Graficos",
-                    "Switch: aceptar el perfil de GPU alta aunque suba la memoria a 1600 MHz. Por defecto NO: si "
-                    "no hay ninguno que deje la RAM donde estaba, la GPU se queda como estaba. El log [apm] dice "
-                    "cual entro");
+REXCVAR_DEFINE_BOOL(cod2_switch_ram_1600, true, "Graficos",
+                    "Switch: aceptar un perfil de GPU alta que suba la memoria a 1600 MHz cuando no hay "
+                    "ninguno que deje la RAM donde estaba. NO es lo mismo que pedir 1600: el perfil que "
+                    "respeta la memoria se intenta primero. En false, una consola sin ese perfil se queda en "
+                    "307,2 MHz. El log [apm] dice cual entro");
 
 namespace cod2::rendimiento {
 
