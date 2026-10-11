@@ -98,6 +98,7 @@ def numeros(bloque):
     for clave, patron in (
         ("fallos", r"lectura emulada ([\d.]+)"),
         ("dib", r"por fotograma: ([\d.]+) dibujados"),
+        ("res", r"\| ([\d.]+) resolves"),
         ("mb", r"([\d.]+) MB de memoria compartida subida"),
         ("main", r'"Main XThread \(F": CPU ([\d.]+)%'),
         ("gpu", r'"GPU Commands \(F": CPU ([\d.]+)%'),
@@ -147,12 +148,18 @@ def main():
     print()
 
     total = {}
+    modos = {}
     informes = 0
     for bloque in bloques(texto):
         d = numeros(bloque)
         if d is None:
             continue
         informes += 1
+        # La rotacion de omision (L+R+ZL en el juego) quita una parte del trabajo de GPU por informe, asi que sus
+        # informes no son de una escena: se guardan aparte y se comparan entre si.
+        if d["modo"] not in ("normal", "arranque"):
+            modos.setdefault(d["modo"], []).append(d)
+            continue
         # Los informes sin dibujados son el arranque: no son ninguna de las tres escenas.
         if d["dib"] <= 0:
             continue
@@ -206,6 +213,20 @@ def main():
     print("transferencias por fotograma: %.1f llamadas, de las cuales %.1f las pide un resolve del juego"
           % (media_de(total, "tr"), media_de(total, "poresolve")))
     print()
+    # La rotacion de omision: cada modo es una medida del mismo sitio con una parte del trabajo de GPU quitada, asi
+    # que se leen unos contra otros y no contra las escenas. "sin nada" contra "normal" es el coste entero del
+    # trabajo de GPU; si apenas cambia, el coste no esta en el trabajo.
+    if modos:
+        print("modos de omision (la rotacion L+R+ZL en el juego; cada modo es una medida del mismo sitio):")
+        print("%-24s %4s %8s %9s %10s %11s %10s %10s %10s" % (
+            "modo", "n", "fps", "dib/fot", "pases/fot", "area MB/f", "MB/fot", "trans/fot", "res/fot"))
+        for nombre, v in modos.items():
+            n = len(v)
+            media = lambda c: sum(x[c] for x in v) / n
+            print("%-24s %4d %8.2f %9.1f %10.1f %11.2f %10.2f %10.1f %10.1f" % (
+                nombre, n, media("fps"), media("dib"), media("pases"), media("area"), media("mb"), media("tr"),
+                media("res")))
+        print()
     print("informes leidos: %d (%d s de sesion)" % (informes, informes * 10))
     print("dibujados por ancho de la superficie, medio por escena:")
     for nombre in ("menu", "juego", "cinematica"):

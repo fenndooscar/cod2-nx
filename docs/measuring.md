@@ -153,7 +153,16 @@ chosen:
    the frame is not bandwidth-bound by the passes and the next change belongs somewhere else — which is the answer
    that matters, because it is the one that stops the next round from being another blind guess. Do not read the
    frame rate of one run alone: the game's own scene changes more than the change under test does.
-5. **What is still missing: per-pass GPU time.** Nothing here says whether the frame is bound by the passes'
+5. **The same question, answered by removing the work instead of by counting it.** Holding **L+R+ZL** in game
+   starts a rotation that removes one part of the GPU work per ten-second report, in this order: `normal`,
+   `sin dibujados` (no draws), `sin transferencias`, `sin resolves`, `sin cargas de texturas`, `sin efecto de
+   presentacion`, `sin despacho por baldosas`, `sin nada` (all of it), and then back to `normal`. Each report says
+   which mode it was in, so the eight modes are eight measurements of the same spot, and the difference between
+   `normal` and `sin nada` is the whole cost of the GPU work. The image is wrong while a mode lasts, which is
+   expected. If `sin nada` is just as slow as `normal`, the cost is not in the work at all but in something fixed
+   (submissions, the driver, the fence waits), and no amount of cutting draws or passes will help. This is the
+   cheapest measurement in this list and the one that has never been run in this port.
+6. **What is still missing: per-pass GPU time.** Nothing here says whether the frame is bound by the passes'
    bandwidth or by the pixels the draws shade; the scissor counter (counter 6) is the sum of every draw's scissor
    rectangle without clipping, so it is an upper bound of an upper bound. That needs `vkCmdWriteTimestamp` at the
    pass boundaries, read back a frame later, with the scale of the section above — the parked native renderer
