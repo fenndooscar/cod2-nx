@@ -11,9 +11,10 @@
 // Usage: cod2_video_bink_prueba <fichero.bik> <ancho> <alto> <fotogramas> <pistas_audio> [--volcar <carpeta>]
 //
 // With `--volcar` it also decodes the first eight frames in order and writes their three planes, tightly packed, as
-// `nuestro_NN_planoP.bin`. That is the reference tools/comprobar_bink_planos.py compares the console's own dump
-// against: it is the same decoder, so what the comparison proves is the join - the frame descriptor's offsets, the
-// strides and the surface flip - and not the decoder, which tools/comprobar_bink.ps1 already covers.
+// `nuestro_NN_planoP.bin`. These are FFmpeg's planes in FFmpeg's order, which is Y, U, V; the game's own surfaces
+// hold Bink's order, Y, V, U, so a comparison against a dump of the game has to cross the two chroma planes. For
+// checking the port's join, the reference should be the game's own decoder instead - see
+// tools/comprobar_bink_planos.py. What this is for is looking at a frame.
 #include <algorithm>
 #include <cassert>
 #include <cstdio>

@@ -154,18 +154,17 @@ a texture. So 58 % of a cutscene's CPU is the exception path (`svcReturnFromExce
 only 8.7 % is the decoder itself (`sub_8249DA50` 5.2 %, `sub_824A2EA0` 3.5 %). The handler is not where the time can be
 won: removing both of its locks is worth about 12 %, which would take 0.46 frames per second to 0.52.
 
-**The decoder is now replaced, and that is not the whole of the 58 %.** `app/src/cod2_video_bink_nativo.cpp` decodes
-each frame with FFmpeg and writes it into the game's own surfaces, so the guest's decoder - and every read it makes
-of the previous frame - is out of the path. What is left is the exception path itself: the game still uploads that
-surface as a texture, and the watched range is that texture. Whether the 125,434 reads per second were the decoder's
-reference-frame reads or the game's upload copy decides whether this is enough, and only the console can say. The
-measurement to run is the same 10-second reports with `--cod2_video_bink_nativo` on and off; the counter that matters
-is `lecturas emuladas` in the report header.
+**The decoder is now replaced, and that is the whole of the 58 %.** `app/src/cod2_video_bink_nativo.cpp` decodes each
+frame with FFmpeg and writes it into the game's own surfaces, so the guest's decoder - and every read it makes of the
+previous frame - is out of the path. Measured on the console, same 10-second reports: the cutscenes go from 0.46
+frames per second to **28.5-30.9**, and `lecturas emuladas` in the report header from 125,434 per second to **0**. The
+read storm *was* the decoder's reference-frame reads, not the game's upload copy.
 
-If it turns out the reads are the upload copy and not the decoder, the next step is the one the previous port's
-bridge already has the shape of - decode natively, upload that frame as the port's own texture and let the game's
-draw of the movie quad find it (`ColaVideo`, `CapturarPlanosVideo`, `AnotarDibujoVideo` in
-`app/src/aparcado/cod2_video_bridge.h`).
+That leaves the exception path around the surface the game uploads as a texture: still there, but no longer the wall.
+At 28.5-30.9 frames per second of 30 the movies run at their own frame rate, and the counter that mattered is zero
+rather than merely smaller. If the reads come back, the next step is the one the previous port's bridge already has
+the shape of - decode natively, upload that frame as the port's own texture and let the game's draw of the movie quad
+find it (`ColaVideo`, `CapturarPlanosVideo`, `AnotarDibujoVideo` in `app/src/aparcado/cod2_video_bridge.h`).
 
 FFmpeg's Bink decoder is now enabled for this build (`config_cod2_bink.h`); it was vendored but on in no configuration
 at all. `tools/comprobar_ffmpeg.py` checks that it stays enabled, because a decoder that is not registered makes
@@ -191,9 +190,9 @@ points at this address" by following the `lis`/`addi` pair the compiler emits fo
 | `sub_822D1ED8` | the game's "start a movie" entry, no direct caller (reached through a function pointer) | calls the three below |
 | `sub_822D1A30` | opens `<name>.bik`: builds the name, appends the `.bik` at `0x8205C208`, opens the file, then calls the decoder | read from the code |
 | `sub_822D12E8`, `sub_822D1648` | the movie object and the blit, both called from `sub_822D1ED8` | read from the code |
-| `sub_82497D90` | `BinkDoFrame`: decodes the frame's planes, frame ring buffer at `+688`..`+700` | read from the code; calls `sub_8249F980` |
-| `sub_8249F980` | decodes all planes of one frame, one call per plane | read from the code |
-| `sub_8249DA50` | decodes one plane; 7,984 bytes, the hottest guest function in a cutscene | read from the code; 4 call sites in `sub_8249F980` |
+| `sub_82497D90` | `BinkDoFrame`: the per-frame entry, frame ring buffer at `+688`..`+700` | read from the code; calls `sub_8249F980` once per frame |
+| `sub_8249F980` | the frame driver: flips the double buffer, then one call per plane | read from the code |
+| `sub_8249DA50` | decodes one plane; 7,980 bytes, the hottest guest function in a cutscene | read from the code; 3 call sites in `sub_8249F980` for these movies |
 | `sub_824A2EA0` | helper of the plane decoder | read from the code |
 
 The files are **Bink 1, version `i`** (`42 49 4B 69`), 1280x720, 30 frames per second - read from the `.bik` headers
@@ -245,7 +244,15 @@ the whole layout:
 | `+0x04`, `+0x08` | width, height |
 | `+0x0C`, `+0x10` | width/2, height/2 |
 | `+0x14` | which of the two surfaces is being written |
-| `+0x18`, `+0x48` | the two surfaces, each four 12-byte slots of `(flag, pointer, stride)`: Y, U, V, and a fourth the game leaves null |
+| `+0x18`, `+0x48` | the two surfaces, each four 12-byte slots of `(flag, pointer, stride)`: the three planes in **Bink's** order, Y then V then U, and a fourth the game leaves null |
+
+The slot order is the one thing in that table that is not the obvious one, and it is the one that shows on screen.
+Bink's bitstream carries Y, V, U, and FFmpeg reads them in that order but writes the second into `data[2]` and the
+third into `data[1]`, because an `AVFrame` has to be standard YUV420P - that is what its `swap_planes` does for
+version `>= 'h'` (`plane_idx = plane ? plane ^ 3 : plane`, `libavcodec/bink.c`). The game's decoder is the real Bink
+library and writes bitstream plane *k* into slot *k*, so the port has to cross the two chroma planes on the way in.
+It did not, at first: the planes went into the slots FFmpeg named them by, which mirrors the hue, and on a game this
+warm - sand, fire, dusk - that reads as "the colours have gone blue".
 
 The two surfaces are double buffered: `sub_8249F980` flips `+0x14` to the other one when that one's Y pointer is not
 null, writes the three planes into the new surface and reads the old one as the reference frame for motion
@@ -254,10 +261,18 @@ compensation. That is the whole of the guest's frame step, and the hook does the
 The frame index is in the Bink context, not the descriptor: `sub_82496B20` returns a 17,408-byte context and
 `[context+0x0C]` is the frame about to be decoded, plus one. `[context+184]` is the descriptor.
 
-**It is checked against the guest's own decode, not against a plausible picture.** `tools/comprobar_bink.ps1
--Volcar` writes the reference - the first eight frames of `legal.bik`, three planes each, tightly packed - and
-`--cod2_video_bink_planos=true` makes the console write what its surfaces actually hold. All 8 frames x 3 planes come
-out byte for byte identical, at the guest's strides (1280 for Y, 768 for a 640-wide chroma plane).
+**It is checked against the game's own decoder, not against a plausible picture.** `--cod2_video_bink_planos=true`
+makes the game write eight frames' surfaces to `logs/bink/`, and the check is the same eight frames taken twice: once
+with `--no-cod2_video_bink_nativo`, so the guest's own Bink writes them, and once without, so the port does. All 8
+frames x 3 planes come out byte for byte identical at the guest's strides (1280 for Y, 768 for a 640-wide chroma
+plane) - `tools/comprobar_bink_planos.py` is the comparison.
+
+Where the frames are taken from matters, and this is how the crossed chroma survived the first version of the check:
+the first eight frames of **every one** of these nine movies are a colourless fade from black, so a comparison taken
+there passes whatever order the planes are written in. `--cod2_video_bink_volcar_desde=300` moves the dump to a frame
+with colour in it - `atvi.bik` frame 300 onward - and that is the run that found it. Cross-checked independently
+against FFmpeg's own decode of the same frame: FFmpeg's `data[1]` (Cb) comes out equal to the game's *second* surface
+and its `data[2]` (Cr) to the game's *first*, which is what "Y, V, U" means.
 
 One thing it does not reproduce: `sub_8249F980` returns a byte count that `sub_82497D90` stores in the context at
 `+736`, and `sub_82497990` compares that with `+740` (900 for `legal.bik`). The counter is a running tally inside the

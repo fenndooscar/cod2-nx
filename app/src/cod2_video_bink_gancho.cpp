@@ -19,16 +19,24 @@
 //
 // What this does
 //     Logs the arguments of the movie player and of the two decoder entry points, dumps the 17,408-byte Bink context
-//     once, and can dump the first eight frames' surfaces out of the frame descriptor. The join itself lives in
+//     once, and can dump eight frames' surfaces out of the frame descriptor. The join itself lives in
 //     cod2_video_bink_nativo.cpp, which owns the hooks on sub_82496B20 and sub_8249F980; this file does not hook
 //     those two, so that a single file decides what a frame is decoded by.
 //
+//     The dump is what caught the colour cast: the same eight frames taken twice, once with
+//     --no-cod2_video_bink_nativo so the guest's own decoder writes them and once without, are byte-identical only
+//     when the port puts FFmpeg's chroma planes in the slots the game puts them in. They were crossed, which mirrors
+//     the hue - and on a game this warm, that reads as "the colours have gone blue".
+//
 // How to turn it off without a rebuild
 //     --no-cod2_video_bink_diag (default). --cod2_video_bink_diag=true logs the calls; add
-//     --cod2_video_bink_volcar=true to also write the context dump, and --cod2_video_bink_planos=true to write the
-//     first eight frames' surfaces to logs/bink/, which is what tools/comprobar_bink_planos.py compares against the
-//     native decoder. All three are off by default because the log is written from the guest's own thread, once per
-//     frame.
+//     --cod2_video_bink_volcar=true to also write the context dump, and --cod2_video_bink_planos=true to write eight
+//     frames' surfaces to logs/bink/, which is what tools/comprobar_bink_planos.py compares against the native
+//     decoder. All three are off by default because the log is written from the guest's own thread, once per frame.
+//
+//     --cod2_video_bink_volcar_desde=<frame> moves which frames are dumped. It matters: the first eight frames of
+//     every one of these nine movies are a colourless fade from black, and a chroma comparison taken there passes
+//     whatever the plane order is. `atvi.bik` has real colour from frame 300 on.
 
 #include <atomic>
 #include <cstdint>
@@ -53,6 +61,10 @@ REXCVAR_DEFINE_BOOL(cod2_video_bink_volcar, false, "COD2",
 REXCVAR_DEFINE_BOOL(cod2_video_bink_planos, false, "COD2",
                     "COD2: vuelca a logs/bink/ las tres superficies ya descodificadas de los primeros fotogramas, "
                     "para comprobar que el descodificador nativo da lo mismo que el del juego");
+REXCVAR_DEFINE_INT32(cod2_video_bink_volcar_desde, 0, "COD2",
+                     "COD2: primer fotograma de cada pelicula que se vuelca con cod2_video_bink_planos. Los ocho "
+                     "primeros fotogramas de estas peliculas son un fundido desde negro sin color, asi que una "
+                     "comparacion de croma hecha ahi no distingue nada");
 
 // The generated code declares these as weak aliases of the __imp__ entry points; a hook is a strong
 // definition of the bare name that calls the original (see cod2_consola.cpp).
@@ -157,9 +169,10 @@ void Escribir(const std::filesystem::path& carpeta, const std::string& nombre, c
 // decoder or the native one wrote them, which is the whole point: the two have to be compared.
 //
 // The surfaces are double buffered, `+0x14` says which one was just written, and each of the two is four 12-byte
-// slots of (flag, pointer, stride) at `+0x18`, `+0x48`. The first three are Y, U and V; the fourth this game leaves
-// null. The stride is read from the surface *not* being written, which is what the guest's own code does.
-void VolcarFotograma(uint8_t* base, uint32_t descriptor) {
+// slots of (flag, pointer, stride) at `+0x18`, `+0x48`. The first three are the three planes in **Bink's** order -
+// Y, V, U - which is not FFmpeg's; the fourth is the alpha plane, which these movies do not have. The stride is read
+// from the surface *not* being written, which is what the guest's own code does.
+void VolcarFotograma(uint8_t* base, uint32_t descriptor, uint32_t fotograma) {
   const int n = g_fotogramas_volcados.fetch_add(1);
   if (n >= kFotogramasVolcados || descriptor < 0x1000) {
     return;
@@ -184,7 +197,8 @@ void VolcarFotograma(uint8_t* base, uint32_t descriptor) {
     Escribir(carpeta, etiqueta, rex::memory::GuestPtr<const void*>(base, destino),
              static_cast<size_t>(paso) * alto);
   }
-  REXKRNL_INFO("[bink] fotograma {} volcado: descriptor 0x{:08X}, superficie {}", n, descriptor, escrito);
+  REXKRNL_INFO("[bink] fotograma {} de la pelicula (volcado {}) volcado: descriptor 0x{:08X}, superficie {}", fotograma,
+               n, descriptor, escrito);
 }
 
 }  // namespace
@@ -213,10 +227,14 @@ REX_HOOK_RAW(sub_82497D90) {
     VolcarContexto(base, ctx.r3.u32);
   }
   __imp__sub_82497D90(ctx, base);
-  if (REXCVAR_GET(cod2_video_bink_planos) && n < kFotogramasVolcados) {
+  if (REXCVAR_GET(cod2_video_bink_planos)) {
     // The descriptor is context+184, which is what sub_82497D90 loads into r3 before calling sub_8249F980
-    // (`lwz r3,184(r31)` at 0x824982A4).
-    VolcarFotograma(base, __builtin_bswap32(rex::memory::GuestPtr<const uint32_t*>(base, contexto)[184 / 4]));
+    // (`lwz r3,184(r31)` at 0x824982A4). context+0x0C is the frame about to be decoded, plus one.
+    auto* p = rex::memory::GuestPtr<const uint32_t*>(base, contexto);
+    const uint32_t fotograma = __builtin_bswap32(p[0x0C / 4]);
+    if (fotograma > uint32_t(REXCVAR_GET(cod2_video_bink_volcar_desde))) {
+      VolcarFotograma(base, __builtin_bswap32(p[184 / 4]), fotograma - 1);
+    }
   }
   if (REXCVAR_GET(cod2_video_bink_diag) && n < kLineas) {
     // What the frame's decode left behind: +736 is the value sub_8249F980 returns and +740 is what it is compared

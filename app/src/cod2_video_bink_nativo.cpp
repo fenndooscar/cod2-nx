@@ -15,18 +15,21 @@
 //     is the tool that dumps it):
 //
 //       +0x04 width    +0x08 height    +0x0C width/2    +0x10 height/2    +0x14 which surface is being written
-//       +0x18 + i*48: two double-buffered surfaces, each four 12-byte slots of (flag, pointer, stride) - Y, U, V,
-//       and a fourth the game leaves at zero. `sub_8249F980` flips +0x14 to the other surface when that surface's Y
-//       pointer is not null, writes the three planes into the new one and reads the old one as the reference frame.
+//       +0x18 + i*48: two double-buffered surfaces, each four 12-byte slots of (flag, pointer, stride) - the three
+//       planes in Bink's own order, Y then V then U, and a fourth the game leaves at zero. `sub_8249F980` flips
+//       +0x14 to the other surface when that surface's Y pointer is not null, writes the three planes into the new
+//       one and reads the old one as the reference frame.
 //
-//     That layout is checked, not assumed: FFmpeg's decode of the first eight frames of `legal.bik` is byte for byte
-//     identical to what the guest's own decoder left in those surfaces, all three planes
-//     (tools/comprobar_bink_planos.py, and the procedure is in the header of the gancho file).
+//     That layout is checked, not assumed: with --no-cod2_video_bink_nativo the guest's own decoder writes the
+//     surfaces, and the port's native output is then compared against it frame by frame
+//     (tools/comprobar_bink_planos.py, and the procedure is in the header of the gancho file). Both chroma planes
+//     have to be compared on a frame with colour in it: these movies all open on a colourless fade from black,
+//     which passes whatever order the planes are written in.
 //
 // What this does
-//     Replaces `sub_8249F980`: decodes the frame with the native decoder and writes Y, U and V into the surfaces the
-//     descriptor names, doing the same flip. The guest's decoder is not run at all, so the watched surface is only
-//     ever written, never read.
+//     Replaces `sub_8249F980`: decodes the frame with the native decoder and writes the three planes into the
+//     surfaces the descriptor names, doing the same flip. The guest's decoder is not run at all, so the watched
+//     surface is only ever written, never read.
 //
 // How to turn it off without a rebuild
 //     `--no-cod2_video_bink_nativo`. Every call then goes to the guest's own decoder and the cutscenes are back at
@@ -63,6 +66,20 @@ constexpr uint32_t kPasoSuperficie = 48;     // and the stride between them
 constexpr uint32_t kPuntero = 4;             // within a surface's 12-byte slot: pointer, then stride
 constexpr uint32_t kPaso = 8;
 constexpr uint32_t kRanura = 12;             // between one plane's slot and the next
+
+// The game's three slots hold Bink's three planes in Bink's own order, and Bink's order is not FFmpeg's.
+//
+// Bink's bitstream carries Y, then V, then U. FFmpeg's decoder reads them in that order and writes the second into
+// `data[2]` and the third into `data[1]`, because an `AVFrame` has to be standard YUV420P - that is exactly what its
+// `swap_planes` does for version >= 'h' (`libavcodec/bink.c`: `plane_idx = plane ? plane ^ 3 : plane`). The guest's
+// own decoder is the real Bink library and writes each bitstream plane into the k-th slot the caller passes, so the
+// game's slot 1 holds V and its slot 2 holds U.
+//
+// So the two chroma planes cross over on the way in. Getting this wrong mirrors the hue, and on a game this warm -
+// sand, fire, dusk - that reads as "the colours have gone blue". It is invisible in the check unless the dump is
+// taken from a frame with colour in it: every one of these movies opens on a colourless fade from black, which
+// passes whatever order the planes are written in. `atvi.bik` has colour from frame 300.
+constexpr int kPlanoDeRanura[3] = {0, 2, 1};
 
 uint32_t LeerU32(uint8_t* base, uint32_t direccion) {
   return __builtin_bswap32(rex::memory::GuestPtr<const uint32_t*>(base, direccion)[0]);
@@ -108,14 +125,15 @@ void EscribirPlanos(uint8_t* base, uint32_t descriptor, const cod2::video_bink::
     const uint32_t destino = LeerU32(base, descriptor + indice * kPasoSuperficie + kSuperficies + ranura + kPuntero);
     // The stride comes from the other surface, exactly as the guest reads it.
     const uint32_t paso = LeerU32(base, descriptor + otro * kPasoSuperficie + kSuperficies + ranura + kPaso);
-    if (destino < 0x1000 || paso == 0 || !f.planos[p]) {
+    const int q = kPlanoDeRanura[p];
+    if (destino < 0x1000 || paso == 0 || !f.planos[q]) {
       continue;
     }
     const int ancho = p ? (f.ancho + 1) / 2 : f.ancho;
     const int alto = p ? (f.alto + 1) / 2 : f.alto;
     for (int y = 0; y < alto; ++y) {
       std::memcpy(rex::memory::GuestPtr<uint8_t*>(base, destino + uint32_t(y) * paso),
-                  f.planos[p] + size_t(y) * size_t(f.pasos[p]), size_t(ancho));
+                  f.planos[q] + size_t(y) * size_t(f.pasos[q]), size_t(ancho));
     }
   }
 }
