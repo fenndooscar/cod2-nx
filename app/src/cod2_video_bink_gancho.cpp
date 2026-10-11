@@ -122,7 +122,9 @@ void VolcarContexto(uint8_t* base, uint32_t objeto) {
       rex::filesystem::GetExecutableFolder() / "logs" / "bink_contexto.bin";
   std::error_code ec;
   std::filesystem::create_directories(ruta.parent_path(), ec);
-  std::FILE* f = _wfopen(ruta.c_str(), L"wb");
+  // std::fopen, not _wfopen: the Switch has no wide-character open. Both paths here are the executable's own folder,
+  // so the narrow form is the same string on either platform.
+  std::FILE* f = std::fopen(ruta.string().c_str(), "wb");
   if (!f) {
     REXKRNL_WARN("[bink] no se puede escribir {}", ruta.string());
     return;
@@ -141,7 +143,7 @@ std::atomic<int> g_fotogramas_volcados{0};
 void Escribir(const std::filesystem::path& carpeta, const std::string& nombre, const void* datos, size_t bytes) {
   std::error_code ec;
   std::filesystem::create_directories(carpeta, ec);
-  std::FILE* f = _wfopen((carpeta / nombre).c_str(), L"wb");
+  std::FILE* f = std::fopen((carpeta / nombre).string().c_str(), "wb");
   if (!f) {
     REXKRNL_WARN("[bink] no se puede escribir {}", (carpeta / nombre).string());
     return;

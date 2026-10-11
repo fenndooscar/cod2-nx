@@ -26,7 +26,7 @@ set(COD2_SOURCES
     # The game's cutscenes are Bink 1 (`.bik`). This decodes them with FFmpeg instead of letting the guest run its own
     # recompiled Bink: the guest's decoder is only 8.7 % of a cutscene's CPU, but the frame it writes back is a watched
     # texture and every read of it faults, which is 58 % (docs/audio-and-video.md). Built by
-    # tools/comprobar_bink.ps1 on its own, and not hooked into the game yet.
+    # tools/comprobar_bink.ps1 on its own; the join that puts it in the game is the next line.
     src/cod2_video_bink.cpp
     # What replaces the guest's own Bink: the frame decode of sub_8249F980, written into the surfaces the game's own
     # frame descriptor names. Cvar `cod2_video_bink_nativo`, on by default.
