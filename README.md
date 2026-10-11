@@ -167,6 +167,14 @@ Done and verified on Windows (see [docs/building.md](docs/building.md)):
   not a ninja output, so once the ELF is up to date `ninja` has nothing to do: deleting the NRO and rebuilding printed
   `Built … in 0 min` and left no NRO at all. The script now removes the ELF when the NRO is missing, which forces the
   relink and the step, and fails loudly if the build still leaves no NRO.
+- **Asked the console for the GPU profile the game never asks for itself.** Every profiler report of an in-game session
+  carried the same line, `relojes: CPU 1020.0 MHz, GPU 307.2 MHz, memoria 2131.2 MHz`, and neither `switch-logs/logs/`
+  nor `switch-logs/logs-old-1/` had a single `[apm]` line in `rex_stderr.log`: nothing was requesting anything, so the
+  GPU sat at the 307.2 MHz Horizon hands a game that asks for nothing. `app/src/cod2_rendimiento.cpp` now calls
+  `RexSwitchApmPedirGpuMhz` / `RexSwitchApmAplicar` from `OnPostInitLogging` and asks for the official handheld profile
+  `0x92220008` — GPU 460.8 MHz with the memory left at 1331.2 MHz — which is what the previous port did in its own step
+  5. It is not an overclock: it goes through `apm`, the same service any commercial game uses. `cod2_switch_gpu_mhz = 0`
+  in `cod2.toml` leaves the console alone, and the next report says which clock really came in.
 
 Not done, in the order they have to happen:
 
@@ -218,6 +226,35 @@ unset was the campaign bug fixed above, and it is handled.
 
 ~~12. Clear the nine unresolved branches.~~ Done: `app/codegen.log` reports zero. The cause was `dataPointerScan`
 declaring functions inside functions, and one hand-added entry in `app/huecos.toml`; both are fixed.
+
+13. **Bring in-game performance to 30 FPS at 720p.** Measured on the console in handheld mode, from
+    `switch-logs/logs-old-1/rex/rex_perfil.log` (47 in-game reports): **3.26 FPS**, and it is the GPU, not the CPU.
+    The evidence, all from the same log:
+    - `libnx por segundo` spends **834 ms of every second** waiting for fences (83 % of the wall time), while the
+      game's own main thread answers `0 % esperando en el kernel` — it is not blocked, it is spinning on the GPU.
+    - A heavy frame takes 306 ms and spends about **255 ms of it inside the GPU**; the emulated GPU's own command
+      recorder (`GPU Commands`) uses only 11.8 % of a core, so it is not the one working.
+    - The two guest threads that do burn a core (95.1 % and 95.2 %) are in **busy-waits**: `sub_823800D8` scans nine
+      40-byte slots and then spins on the guest flag at `0x82BD6360`, and `sub_8237FE40` is the same shape over
+      `sub_8237FD08`. That is 190 % of a core doing nothing, and it buys no frames while the GPU is the wall — the
+      previous port only found these worth replacing once the GPU fitted in the budget.
+
+    What is left, in the order the previous port had to do it (`docs/performance-history.md` steps 2–5), and the first
+    one is already in:
+    1. the GPU profile (done, above): 307.2 → 460.8 MHz, +50 % of GPU;
+    2. the GPU work itself, which is the real wall. 424 draws, **65.9 resolves (6.35 screens of area), 437 transfer
+       calls, 65.9 texture loads and 28.08 MB of shared memory uploaded per frame** is work the Xbox 360 never did:
+       its EDRAM made the resolve and the overdraw free, and this path pays for both. The previous port cut exactly
+       this from 60 to 33 ms per frame (one pass instead of tiling, resolves by swapping images, dynamic uniform
+       buffers, ZCULL, cheaper shadow maps) — and it needed the native renderer to do it, which is item 6 above;
+    3. the guest busy-waits, once 2 fits;
+    4. function ordering: `app/orden_funciones.ld` still names 555 of the other game's addresses and matches nothing,
+       so it is inert. Regenerating it with `tools/calientes.py` against a console log of *this* game is free FPS.
+
+    Before optimising anything here, read [docs/measuring.md](measuring.md): the `tijera … pantallas` counter is the
+    sum of every draw's scissor rectangle, not the pixels shaded, so it is an upper bound of an upper bound and cannot
+    be used to size the fill. The numbers that do hold are the fence wait, the per-frame counters above, and the
+    profiler's per-thread stacks.
 
 ## Requirements
 

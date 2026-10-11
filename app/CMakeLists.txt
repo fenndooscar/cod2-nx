@@ -23,6 +23,9 @@ set(COD2_SOURCES
     src/cod2_consola.cpp
     # Profile dump of the instrumented build for PGO (COD2_PGO=generar; empty otherwise).
     src/cod2_pgo.cpp
+    # The console profile the game never asks for itself: 460.8 MHz of GPU in handheld through apm
+    # (cvar cod2_switch_gpu_mhz, 0 leaves the console alone).
+    src/cod2_rendimiento.cpp
     # The game's cutscenes are Bink 1 (`.bik`). This decodes them with FFmpeg instead of letting the guest run its own
     # recompiled Bink: the guest's decoder is only 8.7 % of a cutscene's CPU, but the frame it writes back is a watched
     # texture and every read of it faults, which is 58 % (docs/audio-and-video.md). Built by

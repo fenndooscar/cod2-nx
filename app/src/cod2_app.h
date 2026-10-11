@@ -28,6 +28,7 @@
 
 #include "cod2_perfil_pc.h"
 #include "cod2_pc_simbolos.h"
+#include "cod2_rendimiento.h"
 
 class Cod2App : public rex::ReXApp {
  public:
@@ -178,6 +179,9 @@ class Cod2App : public rex::ReXApp {
     // the synthetic device would only shadow the libnx controllers.
     PonerSiNadieLoPidio("mnk_mode", "true");
 #endif
+    // The console's GPU profile, which the game never asks for on its own and without which the GPU is
+    // the wall of every in-game frame (cod2_rendimiento.cpp). Off with cod2_switch_gpu_mhz = 0.
+    cod2::rendimiento::AplicarRendimiento();
   }
 
   void OnPostSetup() override {
