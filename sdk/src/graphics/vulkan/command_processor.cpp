@@ -3244,25 +3244,35 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
 
 void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
     VkRenderPass render_pass, const VulkanRenderTargetCache::Framebuffer* framebuffer,
-    VkImageView transfer_dest_view, bool transfer_dest_is_depth) {
+    VkImageView transfer_dest_view, bool transfer_dest_is_depth, uint32_t area_width,
+    uint32_t area_height) {
   SubmitBarriers(false);
   const ui::vulkan::VulkanDevice* vulkan_device = GetVulkanDevice();
   bool use_dynamic_rendering =
       REXCVAR_GET(vulkan_dynamic_rendering) && vulkan_device->properties().dynamicRendering;
 
+  // cod2 - the render area to use, never larger than the framebuffer. A transfer pass has to cover everything
+  // it draws, so the caller passes the union of its rectangles; without it, the whole EDRAM allocation is
+  // covered and stored, which is what a resolve pays for (see cod2_area_de_dibujo_ajustada).
+  VkExtent2D render_area = framebuffer->host_extent;
+  if (area_width && area_height && area_width <= render_area.width &&
+      area_height <= render_area.height) {
+    render_area.width = area_width;
+    render_area.height = area_height;
+  }
+
   // cod2 - a transfer covers the whole render target, so it must not reuse a pass that a draw began with a
   // smaller render area (cod2_area_de_dibujo_ajustada), or the transfer would be clipped.
   if (use_dynamic_rendering) {
     if (in_render_pass_ && current_framebuffer_ == framebuffer &&
-        current_render_pass_ == VK_NULL_HANDLE &&
-        current_render_area_width_ == framebuffer->host_extent.width &&
-        current_render_area_height_ == framebuffer->host_extent.height) {
+        current_render_pass_ == VK_NULL_HANDLE && current_render_area_width_ == render_area.width &&
+        current_render_area_height_ == render_area.height) {
       return;
     }
   } else {
     if (current_render_pass_ == render_pass && current_framebuffer_ == framebuffer &&
-        current_render_area_width_ == framebuffer->host_extent.width &&
-        current_render_area_height_ == framebuffer->host_extent.height) {
+        current_render_area_width_ == render_area.width &&
+        current_render_area_height_ == render_area.height) {
       return;
     }
   }
@@ -3278,8 +3288,8 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
 
   current_render_pass_ = use_dynamic_rendering ? VK_NULL_HANDLE : render_pass;
   current_framebuffer_ = framebuffer;
-  current_render_area_width_ = framebuffer->host_extent.width;
-  current_render_area_height_ = framebuffer->host_extent.height;
+  current_render_area_width_ = render_area.width;
+  current_render_area_height_ = render_area.height;
 
   if (use_dynamic_rendering) {
     VkRenderingAttachmentInfo color_attachment = {};
@@ -3317,7 +3327,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
     rendering_info.flags = 0;
     rendering_info.renderArea.offset.x = 0;
     rendering_info.renderArea.offset.y = 0;
-    rendering_info.renderArea.extent = framebuffer->host_extent;
+    rendering_info.renderArea.extent = render_area;
     rendering_info.layerCount = 1;
     rendering_info.viewMask = 0;
     rendering_info.colorAttachmentCount = transfer_dest_is_depth ? 0 : 1;
@@ -3333,7 +3343,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
     render_pass_begin_info.framebuffer = framebuffer->framebuffer;
     render_pass_begin_info.renderArea.offset.x = 0;
     render_pass_begin_info.renderArea.offset.y = 0;
-    render_pass_begin_info.renderArea.extent = framebuffer->host_extent;
+    render_pass_begin_info.renderArea.extent = render_area;
     render_pass_begin_info.clearValueCount = 0;
     render_pass_begin_info.pClearValues = nullptr;
     deferred_command_buffer_.CmdVkBeginRenderPass(&render_pass_begin_info,

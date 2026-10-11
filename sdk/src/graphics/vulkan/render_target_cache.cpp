@@ -41,6 +41,11 @@ REXCVAR_DEFINE_STRING(render_target_path_vulkan, "", "GPU/Vulkan",
                       "Vulkan render target implementation path")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+// cod2 - defined in command_processor.cpp, where the render area it controls is used. The transfer and resolve
+// passes have to be given an area of their own here, because they are the ones that know which rectangles they
+// are about to write; see the note there.
+REXCVAR_DECLARE(bool, cod2_area_de_dibujo_ajustada);
+
 // DEFINE_string(
 //     render_target_path_vulkan, "",
 //     "Render target emulation path to use on Vulkan.\n"
@@ -4885,9 +4890,47 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
     VkImageView transfer_dest_view = dest_rt_key.is_depth ? dest_vulkan_rt.view_depth_stencil()
                                                           : dest_vulkan_rt.view_color_transfer();
 
+    // cod2 - how much of the destination the transfer pass really writes, for its render area. The destination
+    // image is as tall as the EDRAM allocation, not as tall as the image the guest uses
+    // (RenderTargetCache::GetRenderTargetHeight gives 2048 rows for a 1280-wide 32bpp target), while the
+    // transfers cover the tiles the guest resolved and nothing more. Ending a render pass on this GPU stores
+    // every attachment and the next begin loads it back (docs/platform-notes.md), so the render area is what
+    // each of the dozens of resolves a frame costs. The union of the rectangles that are going to be drawn or
+    // cleared is a safe area: the transfer draws and the stencil clears are built from exactly these
+    // rectangles, and the resolve clear, which is cut out of them because it overwrites those pixels anyway,
+    // is the seed of the union - so the clear stays in the same pass instead of beginning a second one. Setting
+    // cod2_area_de_dibujo_ajustada to false in cod2.toml turns this off too.
+    uint32_t transfer_area_width = 0, transfer_area_height = 0;
+    const auto ampliar_area_de_transferencia = [&](const Transfer::Rectangle& rectangle) {
+      if (!rectangle.width_pixels || !rectangle.height_pixels) {
+        return;
+      }
+      transfer_area_width = std::max(
+          transfer_area_width,
+          (rectangle.x_pixels + rectangle.width_pixels) * draw_resolution_scale_x());
+      transfer_area_height = std::max(
+          transfer_area_height,
+          (rectangle.y_pixels + rectangle.height_pixels) * draw_resolution_scale_y());
+    };
+    if (REXCVAR_GET(cod2_area_de_dibujo_ajustada) && resolve_clear_rectangle) {
+      ampliar_area_de_transferencia(*resolve_clear_rectangle);
+    }
+
     if (!current_transfers.empty()) {
       uint32_t dest_pitch_tiles = dest_rt_key.GetPitchTiles();
       bool dest_is_64bpp = dest_rt_key.Is64bpp();
+
+      if (REXCVAR_GET(cod2_area_de_dibujo_ajustada)) {
+        Transfer::Rectangle area_rectangles[Transfer::kMaxRectanglesWithCutout];
+        for (const Transfer& transfer : current_transfers) {
+          const uint32_t area_rectangle_count = transfer.GetRectangles(
+              dest_rt_key.base_tiles, dest_pitch_tiles, dest_rt_key.msaa_samples, dest_is_64bpp,
+              area_rectangles);
+          for (uint32_t j = 0; j < area_rectangle_count; ++j) {
+            ampliar_area_de_transferencia(area_rectangles[j]);
+          }
+        }
+      }
 
       // Gather shader keys and sort to reduce pipeline state and binding
       // switches. Also gather stencil rectangles to clear if needed.
@@ -5014,7 +5057,8 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
       // Perform the transfers for the render target.
 
       command_processor_.SubmitBarriersAndEnterRenderTargetCacheRenderPass(
-          transfer_render_pass, transfer_framebuffer, transfer_dest_view, dest_rt_key.is_depth);
+          transfer_render_pass, transfer_framebuffer, transfer_dest_view, dest_rt_key.is_depth,
+          transfer_area_width, transfer_area_height);
 
       if (stencil_clear_rectangle_count) {
         VkClearAttachment* stencil_clear_attachment;
@@ -5333,7 +5377,8 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
     // Perform the clear.
     if (resolve_clear_needed) {
       command_processor_.SubmitBarriersAndEnterRenderTargetCacheRenderPass(
-          transfer_render_pass, transfer_framebuffer, transfer_dest_view, dest_rt_key.is_depth);
+          transfer_render_pass, transfer_framebuffer, transfer_dest_view, dest_rt_key.is_depth,
+          transfer_area_width, transfer_area_height);
       VkClearAttachment resolve_clear_attachment;
       resolve_clear_attachment.colorAttachment = 0;
       std::memset(&resolve_clear_attachment.clearValue, 0,

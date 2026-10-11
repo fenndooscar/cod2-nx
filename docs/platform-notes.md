@@ -244,9 +244,11 @@ how that driver behaves on the console:
   `Framebuffer` now carries the union of the scissors seen so
   far (`used_width` / `used_height`, grown by `VulkanCommandProcessor::IssueDraw`) and passes it as the render area;
   a draw that reaches further than any before it makes the pass begin again with a larger area, so nothing is
-  clipped, and the transfers and resolve clears, which use framebuffers of their own, keep the whole allocation. The
-  setting `cod2_area_de_dibujo_ajustada = false` restores the old area, and counter 35 (`area MB por fotograma`) is
-  the measurement of it.
+  clipped. The transfer and resolve passes, which write a destination of their own, are given the union of the
+  rectangles they are about to draw or clear instead — those rectangles are what `Transfer::GetRectangles` produces
+  for the tiles the guest resolved, and the resolve clear seeds the union so that it stays in the same pass. The
+  setting `cod2_area_de_dibujo_ajustada = false` restores the old area for both, and counter 35
+  (`area MB por fotograma`) is the measurement of it.
 
 ## Presentation
 

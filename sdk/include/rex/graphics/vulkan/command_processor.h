@@ -203,9 +203,14 @@ class VulkanCommandProcessor : public CommandProcessor {
       VkRenderPass render_pass, const VulkanRenderTargetCache::Framebuffer* framebuffer,
       uint32_t area_width = 0, uint32_t area_height = 0);
   // Overload for transfer operations with dynamic rendering.
+  // area_width and area_height are the part of framebuffer->host_extent the transfer
+  // really writes, as in the overload above; a transfer that covered less than the
+  // whole destination would be clipped, so the caller passes the union of the
+  // rectangles it is going to draw.
   void SubmitBarriersAndEnterRenderTargetCacheRenderPass(
       VkRenderPass render_pass, const VulkanRenderTargetCache::Framebuffer* framebuffer,
-      VkImageView transfer_dest_view, bool transfer_dest_is_depth);
+      VkImageView transfer_dest_view, bool transfer_dest_is_depth, uint32_t area_width = 0,
+      uint32_t area_height = 0);
   // Must be called before doing anything outside the render pass scope,
   // including adding pipeline barriers that are not a part of the render pass
   // scope. Submission must be open.

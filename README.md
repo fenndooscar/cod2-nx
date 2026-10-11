@@ -279,10 +279,11 @@ declaring functions inside functions, and one hand-added entry in `app/huecos.to
        passes therefore stored and reloaded 2.8 times the pixels it had to. `Framebuffer` now carries the union
        of the scissors seen so far and the draw path passes it as the render area — the scissor is the hardware
        bound of what a draw can write, so the union is safe, and it only grows, so a pass is begun again only
-       when the guest reaches further than before. Transfers and resolve clears use their own framebuffers and
-       keep the whole allocation. `cod2_area_de_dibujo_ajustada = false` in `cod2.toml` gives the old area back
-       without a rebuild, and the report's `area MB por fotograma` (counter 35) is what shows whether it worked:
-       without it a 1280-wide pass costs 10 MB of colour attachment, with it 3.5 MB;
+       when the guest reaches further than before. The transfer and resolve passes, which write a destination of
+       their own, get the union of the rectangles they are about to draw or clear — the tiles the guest resolved,
+       plus the resolve clear — instead. `cod2_area_de_dibujo_ajustada = false` in `cod2.toml` gives the old area
+       back without a rebuild, and the report's `area MB por fotograma` (counter 35) is what shows whether it
+       worked: without it a 1280-wide pass costs 10 MB of colour attachment, with it 3.5 MB;
     6. the guest busy-waits, once the GPU work fits;
     7. function ordering (done): `app/orden_funciones.ld` held 555 of the other game's addresses and matched nothing.
        It now holds Call of Duty 2's, regenerated with `tools/calientes.py` from `switch-logs/logs-old-1` — the
