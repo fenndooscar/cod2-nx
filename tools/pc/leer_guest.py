@@ -10,10 +10,16 @@ Usage
     python tools/pc/leer_guest.py 0x824337B8 [cuantas]     # 4-byte words
     python tools/pc/leer_guest.py 0x824337B8 24 --bytes    # raw bytes
     python tools/pc/leer_guest.py --regiones               # find the guest memory window
+    python tools/pc/leer_guest.py --volcar salida.bin      # the whole loaded image
 
 The game must be running. Guest addresses are the 0x82xxxxxx ones the recompiler prints.
 The recompiled code turns a guest address into a host one as `base + addr`, where `base` is
 the guest memory window this tool locates by looking for the multi-gigabyte reservation.
+
+`--volcar` writes the loaded image to a file so it can be searched with ordinary tools. It exists
+because the XEX on disk is compressed: strings, tables and the `.rdata` the code points at are not
+readable from the file, only from the process. Pages the runtime has not committed are written as
+zeroes and counted, so a hole is visible rather than silent.
 """
 
 import ctypes
@@ -115,6 +121,42 @@ def abrir(pid):
     return k32.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, pid)
 
 
+# The guest image, from the XEX's own headers: base 0x82000000, and the loaded image reaches a little
+# past 0x84290000. The file is written with offset 0 at IMAGEN_BASE, so a hit at file offset N is guest
+# address IMAGEN_BASE + N and needs no arithmetic.
+IMAGEN_BASE = 0x82000000
+IMAGEN_FIN = 0x84300000
+TROZO = 0x100000
+
+
+def volcar(proceso, destino):
+    """Writes the loaded guest image to a file, one megabyte at a time."""
+    ventana = ventana_invitado(proceso)
+    if ventana is None:
+        print("no se encontro la ventana de memoria de invitado")
+        return 1
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    leidos = ctypes.c_size_t(0)
+    buzon = ctypes.create_string_buffer(TROZO)
+    huecos = 0
+    escritos = 0
+    with open(destino, "wb") as f:
+        for base in range(IMAGEN_BASE, IMAGEN_FIN, TROZO):
+            ok = k32.ReadProcessMemory(proceso, ctypes.c_void_p(ventana + base), buzon,
+                                       ctypes.c_size_t(TROZO), ctypes.byref(leidos))
+            if ok and leidos.value == TROZO:
+                f.write(buzon.raw)
+                escritos += TROZO
+            else:
+                # A page the runtime has not committed yet. Written as zeroes so the offsets of
+                # everything after it stay right; the count says how much of the image is missing.
+                f.write(b"\x00" * TROZO)
+                huecos += 1
+    print(f"{destino}: {IMAGEN_FIN - IMAGEN_BASE} B, {escritos} legibles, "
+          f"{huecos} de {TROZO // 1024} KB a cero; invitado 0x{IMAGEN_BASE:08X} = offset 0")
+    return 0
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -136,6 +178,9 @@ def main():
                   f"asignada 0x{asignada:012X} prot 0x{prot:X}")
         print(f"ventana de invitado: {ventana_invitado(proceso)}")
         return 0
+
+    if sys.argv[1] == "--volcar":
+        return volcar(proceso, sys.argv[2] if len(sys.argv) > 2 else "invitado.bin")
 
     direccion = int(sys.argv[1], 0)
     cuantos = int(sys.argv[2], 0) if len(sys.argv) > 2 and not sys.argv[2].startswith("--") else 16

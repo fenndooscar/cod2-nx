@@ -131,8 +131,7 @@ A timeout alone is not enough: the loop must also retry. The code is in `app/src
 
 Everything below is the previous port's work and **none of it is compiled for this game**: `cod2_video_nativo.cpp`,
 `cod2_video_wmv3.cpp` and the rest of the video path are parked in `app/src/aparcado/`. Call of Duty 2's cutscenes are
-Bink (`.bik`), not [WMV3](glossary.md#wmv3), so the game decodes them itself, with its own recompiled decoder
-(`sub_8249DA50`, 7,984 bytes).
+Bink (`.bik`), not [WMV3](glossary.md#wmv3), so the game decodes them itself, with its own recompiled decoder.
 
 That decoder is not what makes them slow. Measured on the console, handheld, stock clocks, from the 10-second reports
 in `logs/rex/rex_perfil.log`:
@@ -145,26 +144,60 @@ in `logs/rex/rex_perfil.log`:
 
 A cutscene draws two quads per frame and never waits for the GPU, so it is not a graphics problem and lowering the
 render resolution does not touch it. At 0.46 frames per second a frame takes 2.17 s and carries about 322,000 emulated
-reads; the decoded frame is 720x480, which is 345,600 pixels. **One emulated read per pixel.**
+reads, against 345,600 pixels in a 720x480 surface - **one emulated read per pixel**.
 
 The cause is the exception path. Horizon does not let a user process make a page read-only, so "watch this memory for
 CPU writes" is done by unmapping it, and then reads fault as well - the report header says which of the two paths was
-taken: `vigilancia: desmapeo (cada lectura falla)`. The watched range here is the video frame the game has just
-uploaded as a texture, and the Bink decoder reads it back as the reference for the next frame. So 58 % of a cutscene's
-CPU is the exception path (`svcReturnFromException` 34.2 %, `RexResumeTrap` 7.9 %, `RexGmQueryProtect` 7.5 %,
-`RexGmShadowFor` 4.5 %, `RexResumeFromException` 2.6 %, `__libnx_exception_entry` 1.3 %) and only 5.2 % is the decoder
-itself. The handler is not where the time can be won: removing both of its locks is worth about 12 %, which would take
-0.46 frames per second to 0.52.
+taken: `vigilancia: desmapeo (cada lectura falla)`. The watched range is the video frame the game has just uploaded as
+a texture. So 58 % of a cutscene's CPU is the exception path (`svcReturnFromException` 34.2 %, `RexResumeTrap` 7.9 %,
+`RexGmQueryProtect` 7.5 %, `RexGmShadowFor` 4.5 %, `RexResumeFromException` 2.6 %, `__libnx_exception_entry` 1.3 %) and
+only 8.7 % is the decoder itself (`sub_8249DA50` 5.2 %, `sub_824A2EA0` 3.5 %). The handler is not where the time can be
+won: removing both of its locks is worth about 12 %, which would take 0.46 frames per second to 0.52.
 
-The fix is to stop the guest from decoding Bink at all, the same way the previous port stopped it from decoding WMV3:
-decode with FFmpeg and hand the game the planes. FFmpeg's Bink decoder is already vendored
-(`sdk/thirdparty/FFmpeg/libavcodec/bink.c`, `binkaudio.c`, `binkdsp.c`, `libavformat/bink.c`) but is enabled in no
-configuration at all - every `config_*.h` builds only `mp3,mp3float,wmav2,xmaframes` with the `asf` and `mp3`
-demuxers. `config_cod2_wmv3.h` is the worked example of enabling a decoder by hand.
+**So replacing the decoder is not enough on its own.** Decoding with FFmpeg removes the 8.7 %; the 58 % stays as long
+as the guest still writes the decoded frame into a watched texture and the port reads it back. What makes a cutscene
+fast is taking the guest out of the frame path - decode natively, upload that frame as the port's own texture and let
+the game's draw of the movie quad find it, which is the shape the previous port's bridge already has
+(`ColaVideo`, `CapturarPlanosVideo`, `AnotarDibujoVideo` in `app/src/aparcado/cod2_video_bridge.h`).
+
+FFmpeg's Bink decoder is now enabled for this build (`config_cod2_bink.h`); it was vendored but on in no configuration
+at all. `tools/comprobar_ffmpeg.py` checks that it stays enabled, because a decoder that is not registered makes
+`avcodec_find_decoder` return NULL and the port silently falls back to the guest's own decoder.
 
 To confirm the diagnosis without building anything, rename the four campaign cutscenes on the SD card
 (`game_root/movie_africa.bik`, `movie_eastern.bik`, `movie_europe.bik`, `movie_victory.bik`): if the game carries on
 without them, the cost above disappears with them.
+
+### Call of Duty 2's Bink player: the addresses, and where they came from
+
+None of this is inherited - every address below was re-derived from this game, and the method is written down because
+the next one has to be found the same way.
+
+The XEX on disk is compressed, so the strings and tables are not readable from the file: `.bik`, `playMovie` and the
+movie names only exist once the runtime has mapped the image. `tools/pc/leer_guest.py --volcar` dumps that image out
+of a running `cod2.exe` (`tools/pc/jugar.ps1` starts one), and `tools/refiere_datos.py` then answers "which function
+points at this address" by following the `lis`/`addi` pair the compiler emits for every far address. That is how
+`0x8205C208` (`.bik`) was found, and it led to the whole module:
+
+| address | what it is | how it is known |
+|---|---|---|
+| `sub_822D1ED8` | the game's "start a movie" entry, no direct caller (reached through a function pointer) | calls the three below |
+| `sub_822D1A30` | opens `<name>.bik`: builds the name, appends the `.bik` at `0x8205C208`, opens the file, then calls the decoder | read from the code |
+| `sub_822D12E8`, `sub_822D1648` | the movie object and the blit, both called from `sub_822D1ED8` | read from the code |
+| `sub_82497D90` | `BinkDoFrame`: decodes the frame's planes, frame ring buffer at `+688`..`+700` | read from the code; calls `sub_8249F980` |
+| `sub_8249F980` | decodes all planes of one frame, one call per plane | read from the code |
+| `sub_8249DA50` | decodes one plane; 7,984 bytes, the hottest guest function in a cutscene | read from the code; 4 call sites in `sub_8249F980` |
+| `sub_824A2EA0` | helper of the plane decoder | read from the code |
+
+The files are **Bink 1, version `i`** (`42 49 4B 69`), 1280x720, 30 frames per second - read from the `.bik` headers
+themselves. FFmpeg 4.4's Bink decoder covers `b` through `k`, and takes the version from the `codec_tag`, so version
+`i` is supported.
+
+The plane state lives in the decoder context in 48-byte records indexed by the double-buffered frame number at
+`+20`: `+28`, `+32`, `+40`, `+44`, `+52`, `+56`, `+64`, `+68` are the source pointers the plane decoder is handed,
+and `+4`/`+8` and `+12`/`+16` are the two luma and chroma strides. This is read from `sub_8249F980`, which is the
+caller, so it is the layout the hook has to reproduce.
+
 
 ### The previous port's videos
 
