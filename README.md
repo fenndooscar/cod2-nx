@@ -283,7 +283,35 @@ declaring functions inside functions, and one hand-added entry in `app/huecos.to
        their own, get the union of the rectangles they are about to draw or clear — the tiles the guest resolved,
        plus the resolve clear — instead. `cod2_area_de_dibujo_ajustada = false` in `cod2.toml` gives the old area
        back without a rebuild, and the report's `area MB por fotograma` (counter 35) is what shows whether it
-       worked: without it a 1280-wide pass costs 10 MB of colour attachment, with it 3.5 MB;
+       worked: without it a 1280-wide pass costs 10 MB of colour attachment, with it 3.5 MB.
+
+       The render area says what each pass costs; it does not say why there are 141.9 of them, and the next lever
+       depends on that. `VulkanCommandProcessor::EndRenderPass` now takes a reason (counters 36–39: the next pass
+       has a different destination, pipeline barriers had to be recorded, a caller asked for the end with nothing
+       to order, or anything else) and the guest's occlusion queries are counted separately (counter 40, since each
+       one ends the pass twice — once for the query pool reset and once for the result copy — and neither end has
+       anything to do with the attachments). The report prints them as `pases por motivo: destino | barrera |
+       barrera vacia | otra | consultas de oclusion`, and `tools/perfil_consola.py` puts them in a table of their
+       own. Two of the four are the port's own work rather than the guest's: `barrera` is the SDK's synchronization
+       cutting the frame, and `vacia` is a caller ending a pass for nothing. If `consultas` turns out to be a large
+       part of the passes, `occlusion_query_enable = false` in `cod2.toml` measures it without a rebuild — at the
+       cost of the guest reading whatever the query left behind, which changes what the game culls.
+
+       The reason a pass ended is not the same question as what the pass was for, and the second is the one that
+       decides who can remove it. The two render pass entry points are counted apart (counters 42–43 for the
+       passes begun to transfer render target contents or clear a resolved region, 44–45 for the passes begun for
+       the guest's own draws, each with the attachment pixels it covers, printed as `pases por clase: dibujados |
+       transferencias`). The `dibujados` ones are the game's drawing and only drawing less removes them; the
+       `transferencias` ones are the port materializing a render target so it can be sampled as a texture, which
+       is work the Xbox 360 never did because its EDRAM made it free, and those *are* removable in the port — the
+       SDK's own TODO above `PerformTransfersAndResolveClears` asks for exactly that ("perform all non-cross-copying
+       transfers for the current framebuffer configuration in a single pass, to load / store only once"). The
+       transfer line also separates the calls made by the guest's resolve command (counter 41) from those made by
+       binding a render target as a texture, because the two have different fixes. The arithmetic to beat: at 4.86
+       FPS a frame is 206 ms, 141.9 passes of colour plus depth attachment are 21 MB of store and 21 MB of load
+       each at the full EDRAM area (7 MB each once the render area is the guest's 720), and the handheld memory bus
+       moves 34.1 GB/s, so 141.9 × 42 MB / 34.1 GB/s = 175 ms — the passes are the frame. Reaching 33 ms needs the
+       pass count or the bytes per pass down by about five times, and this split says which of the two to attack;
     6. the guest busy-waits, once the GPU work fits;
     7. function ordering (done): `app/orden_funciones.ld` held 555 of the other game's addresses and matched nothing.
        It now holds Call of Duty 2's, regenerated with `tools/calientes.py` from `switch-logs/logs-old-1` — the

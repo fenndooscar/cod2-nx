@@ -249,6 +249,39 @@ how that driver behaves on the console:
   for the tiles the guest resolved, and the resolve clear seeds the union so that it stays in the same pass. The
   setting `cod2_area_de_dibujo_ajustada = false` restores the old area for both, and counter 35
   (`area MB por fotograma`) is the measurement of it.
+- **A frame of this port is attachment traffic, and the arithmetic closes.** The memory bus is the one thing a
+  renderer cannot talk its way out of: a handheld Switch at the stock 1331.2 MHz moves 21.3 GB/s, and the overclocked
+  one this port is measured on (2131.2 MHz, which is what the report's `relojes` line prints) moves 34.1 GB/s. A
+  render pass on a 1280-wide target stores and reloads **21 MB** of attachment while the image is as tall as the
+  allocation (10.49 MB of colour plus 10.49 MB of depth) and **7 MB** once the render area is the guest's 1280x720.
+  Measured in game: 141.9 passes per frame at 4.86 FPS. 141.9 x 21 MB x 2 (store and load) / 34.1 GB/s = **175 ms**
+  of a 206 ms frame — the model is the measurement. With the render area narrowed it predicts 141.9 x 7 x 2 /
+  34.1 GB/s = 58 ms, so the render area is worth about 3x and nothing more; getting to 33 ms (30 FPS) needs the
+  number of passes or the bytes per pass cut again, and that is what the pass reasons below are for.
+- **Why a pass ended is a separate question from what it cost, and it is the one that decides the next change.**
+  `VulkanCommandProcessor::EndRenderPass` takes a reason and the profiler keeps one counter per reason (36–39:
+  the next pass has a different destination, pipeline barriers had to be recorded, a caller asked for the end with
+  no barriers pending, or anything else), plus counter 40 for the guest's occlusion queries, each of which ends the
+  pass twice for reasons that have nothing to do with the attachments (a query pool reset before it and a result
+  copy after it, both of which are only allowed outside a render pass). The report line is
+  `pases por motivo: destino | barrera | barrera vacia | otra | consultas de oclusion`. Read it as a budget: two of
+  the four reasons are the port's own work and not the guest's, and those are the ones that can be removed without
+  changing what the game draws. `occlusion_query_enable = false` in `cod2.toml` measures the query share without a
+  rebuild, at the cost of the guest reading whatever the query left behind.
+- **What a pass was for matters more than why it ended, because it says who can remove it.** There are two render
+  pass entry points and the profiler counts them apart: the one that begins a pass for the guest's own draws
+  (counters 44–45) and the one that begins a pass to transfer render target contents or clear a resolved region
+  (counters 42–43), each with the attachment pixels it covers. The report line is
+  `pases por clase: dibujados | transferencias`. The `dibujados` half is the game's drawing, and only drawing less
+  removes it. The `transferencias` half is the port's own machinery: the Xbox 360 kept render targets in EDRAM and
+  could sample them directly, while here every render target that is going to be read as a texture has to be
+  copied out first, in a render pass of its own, because a copy cannot be recorded inside the pass that is drawing
+  into it. On a tile-based GPU that pass means storing the attachments of the pass it interrupted and loading them
+  again afterwards, so the port pays for the same tiles twice per transfer. `PerformTransfersAndResolveClears`
+  carries the SDK's own TODO for it ("perform all non-cross-copying transfers for the current framebuffer
+  configuration in a single pass, to load / store only once"). The transfer line also separates the calls the
+  guest's resolve command makes (counter 41) from those made by binding a render target as a texture, because they
+  have different fixes.
 
 ## Presentation
 

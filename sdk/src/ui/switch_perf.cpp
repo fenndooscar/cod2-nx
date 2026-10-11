@@ -103,7 +103,7 @@ constexpr u64 kReportSeconds = 10;
 constexpr u64 kStartDelayNs = 8000000000ULL;
 constexpr size_t kMaxSamples = 1 << 15;
 constexpr size_t kFrames = 10;
-constexpr unsigned kCounterCount = 36;
+constexpr unsigned kCounterCount = 46;
 // In <NRO folder>/logs/rex/ (switch_crash_hooks.c computes it at startup).
 std::string ReportPath() {
   return std::string(RexSwitchLogDir()) + "rex_perfil.log";
@@ -531,12 +531,12 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
   if (frames > 0) {
     std::fprintf(f,
                  "     por fotograma: %.0f dibujados | tijera %.1f pantallas | %.1f envios | "
-                 "%.1f resolves (%.2f pantallas) | transferencias: %.1f llamadas, %.1f render "
+                 "%.1f resolves (%.2f pantallas) | transferencias: %.1f llamadas (%.1f por resolve), %.1f render "
                  "targets, %.1f dibujados | %.1f texturas cargadas | %.2f MB de memoria "
                  "compartida subida | pipelines creados en el intervalo: %.0f\n",
                  delta(5) / frames, delta(6) / frames / 921600.0, delta(7) / frames,
                  delta(9) / frames, delta(10) / frames / 921600.0, delta(11) / frames,
-                 delta(12) / frames, delta(13) / frames, delta(14) / frames,
+                 delta(41) / frames, delta(12) / frames, delta(13) / frames, delta(14) / frames,
                  delta(15) / frames / 1048576.0, delta(16));
     std::fprintf(f,
                  "     dibujados por ancho de superficie: 1600+ %.0f | 1280-1599 %.0f | "
@@ -558,6 +558,27 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
                  "baldosas) | area %.2f MB por fotograma (solo color) | %.1f dibujados con barrera de toda "
                  "la memoria compartida\n",
                  delta(33) / frames, delta(35) / frames / 1048576.0, delta(34) / frames);
+    // Why those passes ended. The count above times the render area is the frame's attachment traffic, so this
+    // is the budget: the largest reason is the one worth making cheaper. "destino" is a pass that had to give
+    // way to a different render pass, framebuffer or render area, and "barrera" one that had to be ended so
+    // that pipeline barriers could be recorded; both are structural, but the barriers are the port's own and
+    // the destinations are the guest's. "barrera vacia" is a caller asking for the end with nothing to order,
+    // and "otra" is everything else (occlusion queries among it). "consultas" is the guest's occlusion queries,
+    // each of which ends the pass twice; setting occlusion_query_enable to false in cod2.toml measures them.
+    std::fprintf(f,
+                 "     pases por motivo: destino %.1f | barrera %.1f | barrera vacia %.1f | otra %.1f | "
+                 "consultas de oclusion %.1f\n",
+                 delta(36) / frames, delta(37) / frames, delta(38) / frames, delta(39) / frames,
+                 delta(40) / frames);
+    // The same passes split by what they are for, which is the split that decides who can remove them. The
+    // "dibujados" passes are the guest's own drawing - only drawing less removes them. The "transferencias" ones
+    // are the port materializing render target contents so they can be sampled as textures and clearing resolved
+    // regions - work the Xbox 360 did not do, because its EDRAM made it free - and those are removable by a change
+    // in the port. Summing the two and comparing with "finales" also says whether the frame leaves passes open.
+    std::fprintf(f,
+                 "     pases por clase: dibujados %.1f (%.2f MB) | transferencias %.1f (%.2f MB)\n",
+                 delta(44) / frames, delta(45) / frames / 1048576.0, delta(42) / frames,
+                 delta(43) / frames / 1048576.0);
   }
 
   for (unsigned i = 0; i < kCounterCount; ++i) {
@@ -1037,7 +1058,16 @@ void __wrap_svcSleepThread(s64 nano) {
  * (1600 or more, 1280-1599, 640-1279, 256-639, under 256). 33 = render passes
  * ended (EndRenderPass, each one stores and reloads the tile buffer), 34 =
  * draws that push a barrier over the whole shared memory, 35 = attachment
- * pixels of those passes, colour plane only.
+ * pixels of those passes, colour plane only, 36..39 = the same passes by why
+ * they were ended (36 = the next pass has a different destination, 37 =
+ * pipeline barriers had to be recorded, 38 = a caller asked for the end with
+ * no barriers pending, 39 = any other explicit end), 40 = guest occlusion
+ * queries begun (each ends the pass twice), 41 = calls to
+ * PerformTransfersAndResolveClears made by the guest's resolve command rather
+ * than by binding a render target as a texture, 42 and 43 = passes begun for
+ * render target transfers and resolve clears and their attachment pixels,
+ * 44 and 45 = passes begun for the guest's own draws and their attachment
+ * pixels.
  */
 // A long frame, in armGetSystemTick ticks (see VentanaTiron).
 void RexSwitchPerfTiron(u64 inicio, u64 fin) {

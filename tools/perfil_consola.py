@@ -34,11 +34,21 @@ average of the numbers that say which resource is exhausted:
                  not as tall as the guest's 720 (3.5 MB).
   barrera/fot    draws that push a barrier over the whole shared memory buffer, because the port cannot
                  narrow down where the memexport writes. Each one also cuts the render pass in two.
+  destino/fot    of "pases/fot", the ones that had to give way to a different render pass, framebuffer or
+  barrera/fot*   render area, and the ones ended so that pipeline barriers could be recorded. These two are
+  vacia/fot      the structural part: the destinations are what the guest asked for, the barriers are the
+                 port's own. "vacia/fot" is a caller asking for the end with nothing to order and
+                 "otra/fot" is everything else, occlusion queries among it.
+  consultas/fot  guest occlusion queries per frame. Each one ends the render pass twice, and neither end has
+                 anything to do with the attachments, so if this is a large part of "pases/fot" then
+                 occlusion_query_enable = false in cod2.toml measures what they cost.
 
 Reading it: the scene whose "espera ms/s" is near zero is not limited by the GPU, so lowering the
 render resolution cannot help it. The scene with a saturated thread and a saturated GPU is limited by
 both, and there the resolution does matter. If "pases/fot" is of the same order as "dib/fot", the frame
-is being cut into a render pass per draw and the cost is in the passes, not in the pixels.
+is being cut into a render pass per draw and the cost is in the passes, not in the pixels. The pass
+reasons say which lever moves it: many "destino" passes mean the frame alternates between render
+targets, many "barrera" ones mean the port's own synchronization is cutting it.
 
 The "dibujados por ancho de superficie" line of each report also shows the width of the surfaces the
 game draws to; 1280-1599 means the guest is rendering at 720p or more.
@@ -57,6 +67,12 @@ def escena(dibujados):
         if lo <= dibujados < hi:
             return nombre
     return "arranque"
+
+
+def media_de(total, clave):
+    """Media de una columna sobre todos los informes, sin separar por escena."""
+    v = [x for escena_ in total.values() for x in escena_]
+    return sum(x[clave] for x in v) / len(v) if v else 0.0
 
 
 def bloques(texto):
@@ -89,6 +105,21 @@ def numeros(bloque):
         ("pases", r"pases de render: ([\d.]+) finales por fotograma"),
         ("area", r"\| area ([\d.]+) MB por fotograma"),
         ("barrera", r"\| ([\d.]+) dibujados con barrera de toda la memoria compartida"),
+        # Los motivos de pase, de su propia linea. Solo el primero lleva "pases por motivo", asi que los demas
+        # se anclan a los separadores para no casar con la linea de "pases de render" ni con "barrera/fot".
+        ("destino", r"pases por motivo: destino ([\d.]+)"),
+        ("pbarrera", r"destino [\d.]+ \| barrera ([\d.]+) \|"),
+        ("vacia", r"barrera vacia ([\d.]+)"),
+        ("otra", r"\| otra ([\d.]+) \|"),
+        ("consultas", r"consultas de oclusion ([\d.]+)"),
+        ("poresolve", r"transferencias: [\d.]+ llamadas \(([\d.]+) por resolve\)"),
+        ("tr", r"transferencias: ([\d.]+) llamadas"),
+        # Los pases por clase, de su propia linea. "transferencias" sale dos veces en el informe, asi que esta se
+        # ancla al separador de la linea de clases.
+        ("pdib", r"pases por clase: dibujados ([\d.]+)"),
+        ("pdibmb", r"pases por clase: dibujados [\d.]+ \(([\d.]+) MB\)"),
+        ("ptrans", r"\| transferencias ([\d.]+) \("),
+        ("ptransmb", r"transferencias [\d.]+ \(([\d.]+) MB\)"),
     ):
         f = re.search(patron, t)
         d[clave] = float(f.group(1)) if f else 0.0
@@ -141,6 +172,39 @@ def main():
             nombre, n, media("fps"), media("cpu"), media("dib"), media("mb"), media("fallos"),
             media("espera"), media("main"), media("gpu"), media("otro"), media("pases"),
             media("area"), media("barrera")))
+    print()
+    # Los motivos de pase, en su propia tabla: la de arriba ya es ancha y estos numeros se leen juntos.
+    print("por que termina cada pase (por fotograma; la suma es pases/fot):")
+    print("%-11s %10s %10s %10s %9s %9s %13s" % ("escena", "pases/fot", "destino", "barrera", "vacia", "otra",
+                                                  "consultas/fot"))
+    for nombre in ("menu", "juego", "cinematica"):
+        v = total.get(nombre)
+        if not v:
+            continue
+        n = len(v)
+        media = lambda c: sum(x[c] for x in v) / n
+        print("%-11s %10.1f %10.1f %10.1f %9.1f %9.1f %13.1f" % (
+            nombre, media("pases"), media("destino"), media("pbarrera"), media("vacia"), media("otra"),
+            media("consultas")))
+    print()
+    # Para que son esos pases. Los "dibujados" son el dibujo del juego y solo se quitan dibujando menos; los de
+    # "transferencias" son la maquinaria del port (materializar un render target para poder muestrearlo como
+    # textura, y limpiar lo resuelto) y esos si se pueden quitar tocando el port.
+    print("para que son esos pases (por fotograma):")
+    print("%-11s %11s %10s %13s %11s %9s %13s" % ("escena", "dibujados", "MB", "transferencias", "MB", "pases/fot",
+                                                  "suma-dif"))
+    for nombre in ("menu", "juego", "cinematica"):
+        v = total.get(nombre)
+        if not v:
+            continue
+        n = len(v)
+        media = lambda c: sum(x[c] for x in v) / n
+        print("%-11s %11.1f %10.2f %13.1f %11.2f %9.1f %13.1f" % (
+            nombre, media("pdib"), media("pdibmb"), media("ptrans"), media("ptransmb"), media("pases"),
+            media("pdib") + media("ptrans") - media("pases")))
+    print()
+    print("transferencias por fotograma: %.1f llamadas, de las cuales %.1f las pide un resolve del juego"
+          % (media_de(total, "tr"), media_de(total, "poresolve")))
     print()
     print("informes leidos: %d (%d s de sesion)" % (informes, informes * 10))
     print("dibujados por ancho de la superficie, medio por escena:")

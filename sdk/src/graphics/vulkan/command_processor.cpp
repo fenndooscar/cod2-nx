@@ -3122,11 +3122,11 @@ bool VulkanCommandProcessor::SubmitBarriers(bool force_end_render_pass) {
   SplitPendingBarrier();
   if (pending_barriers_.empty()) {
     if (force_end_render_pass) {
-      EndRenderPass();
+      EndRenderPass(RazonDePase::kBarreraVacia);
     }
     return false;
   }
-  EndRenderPass();
+  EndRenderPass(RazonDePase::kBarrera);
   for (auto it = pending_barriers_.cbegin(); it != pending_barriers_.cend(); ++it) {
     auto it_next = std::next(it);
     bool is_last = it_next == pending_barriers_.cend();
@@ -3185,13 +3185,10 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
     }
   }
 
+  // cod2 - through EndRenderPass so that the pass this ends is counted (counter 33) and attributed (36-39); the
+  // fields it clears are set again just below.
   if (in_render_pass_) {
-    if (use_dynamic_rendering) {
-      deferred_command_buffer_.CmdVkEndRendering();
-    } else {
-      deferred_command_buffer_.CmdVkEndRenderPass();
-    }
-    in_render_pass_ = false;
+    EndRenderPass(RazonDePase::kDestino);
   }
 
   current_render_pass_ = use_dynamic_rendering ? VK_NULL_HANDLE : render_pass;
@@ -3239,6 +3236,15 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
     deferred_command_buffer_.CmdVkBeginRenderPass(&render_pass_begin_info,
                                                   VK_SUBPASS_CONTENTS_INLINE);
   }
+#if REX_PLATFORM_SWITCH
+  // Counters 44 and 45: the passes begun for the guest's own draws, and the attachment pixels they cover. Counter
+  // 33 counts every pass the frame ends; this is the half of them that belongs to the draws. The other half comes
+  // from the transfer overload below (counters 42 and 43), and the difference between 33 and the sum of the two is
+  // the passes the frame left open at the end. Which half is the larger is what says whether the frame's
+  // attachment traffic is the game's drawing or the port's resolve and texture-transfer machinery.
+  RexSwitchPerfCount(44);
+  RexSwitchPerfAdd(45, uint64_t(render_area.width) * render_area.height * 4);
+#endif
   in_render_pass_ = true;
 }
 
@@ -3278,12 +3284,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
   }
 
   if (in_render_pass_) {
-    if (use_dynamic_rendering) {
-      deferred_command_buffer_.CmdVkEndRendering();
-    } else {
-      deferred_command_buffer_.CmdVkEndRenderPass();
-    }
-    in_render_pass_ = false;
+    EndRenderPass(RazonDePase::kDestino);
   }
 
   current_render_pass_ = use_dynamic_rendering ? VK_NULL_HANDLE : render_pass;
@@ -3349,10 +3350,19 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
     deferred_command_buffer_.CmdVkBeginRenderPass(&render_pass_begin_info,
                                                   VK_SUBPASS_CONTENTS_INLINE);
   }
+#if REX_PLATFORM_SWITCH
+  // Counters 42 and 43: the passes begun to perform render target transfers or resolve clears, and the attachment
+  // pixels they cover. This is the port's own machinery, not the game's drawing - the game never asked for a
+  // resolve per texture it samples - so it is the half of the frame's attachment traffic that a change in the
+  // port's code can remove, where counters 44 and 45 are the half that only a change in what the game draws can
+  // remove. Compare the two against counter 33.
+  RexSwitchPerfCount(42);
+  RexSwitchPerfAdd(43, uint64_t(render_area.width) * render_area.height * 4);
+#endif
   in_render_pass_ = true;
 }
 
-void VulkanCommandProcessor::EndRenderPass() {
+void VulkanCommandProcessor::EndRenderPass(RazonDePase razon) {
   assert_true(submission_open_);
   if (!in_render_pass_) {
     return;
@@ -3362,6 +3372,11 @@ void VulkanCommandProcessor::EndRenderPass() {
   // again, so this is the count of full-attachment round trips to memory per frame. It is here, and not at
   // the call sites, because this is the only place that actually ends a pass.
   RexSwitchPerfCount(33);
+  // Counters 36-39: the same passes split by why they were ended. This is the report's budget - the count of
+  // passes is the frame's attachment traffic divided by the render area (counter 35), so the reason that turns
+  // out to be the largest is the one to make cheaper. The callers that know the reason pass it in; see
+  // RazonDePase in command_processor.h.
+  RexSwitchPerfCount(36 + uint32_t(razon));
   // Counter 35: the pixels of attachment that round trip is made of, so the report can turn counter 33 into
   // megabytes per frame instead of leaving it as a count. Four bytes per pixel per attachment; the count of
   // attachments is not tracked here, so this is the colour plane only, and the real traffic is at least twice
@@ -5030,7 +5045,15 @@ bool VulkanCommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addr
     return false;
   }
 
-  EndRenderPass();
+  EndRenderPass(RazonDePase::kOtra);
+#if REX_PLATFORM_SWITCH
+  // Counter 40: a guest occlusion query. Each one ends the render pass twice - once here for the query pool
+  // reset and once at the end for the result copy - and neither of those has anything to do with the
+  // attachments, so if this count is a large part of the passes per frame, occlusion_query_enable = false in
+  // cod2.toml is a rebuild-free way to measure what they cost (the guest then reads whatever the query left
+  // behind, so it changes what the game culls).
+  RexSwitchPerfCount(40);
+#endif
 
   DeferredCommandBuffer& command_buffer = deferred_command_buffer();
   command_buffer.CmdVkResetQueryPool(occlusion_query_pool_, host_index, 1);
@@ -5055,7 +5078,7 @@ bool VulkanCommandProcessor::EndGuestOcclusionQuery(uint32_t sample_count_addres
     return false;
   }
 
-  EndRenderPass();
+  EndRenderPass(RazonDePase::kOtra);
 
   DeferredCommandBuffer& command_buffer = deferred_command_buffer();
   command_buffer.CmdVkEndQuery(occlusion_query_pool_, host_index);

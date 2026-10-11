@@ -211,10 +211,26 @@ class VulkanCommandProcessor : public CommandProcessor {
       VkRenderPass render_pass, const VulkanRenderTargetCache::Framebuffer* framebuffer,
       VkImageView transfer_dest_view, bool transfer_dest_is_depth, uint32_t area_width = 0,
       uint32_t area_height = 0);
+  // Why a render pass was ended, for the console report. Ending a pass on this GPU stores every attachment and
+  // beginning one loads it back, so the count of passes is the frame's attachment traffic divided by the render
+  // area, and splitting that count by reason is what says which of the reasons to attack (cod2).
+  enum class RazonDePase : uint32_t {
+    // The next pass has a different render pass, framebuffer or render area - the pass had to be ended before
+    // the new one could begin.
+    kDestino = 0,
+    // Pipeline barriers had to be recorded, and they can't be inside a pass.
+    kBarrera = 1,
+    // A caller asked for the pass to be ended with no barriers pending, so the end is the caller's decision and
+    // not the barrier's: if the caller then records nothing outside the pass, the whole round trip was wasted.
+    kBarreraVacia = 2,
+    // Any other explicit end.
+    kOtra = 3,
+  };
   // Must be called before doing anything outside the render pass scope,
   // including adding pipeline barriers that are not a part of the render pass
   // scope. Submission must be open.
-  void EndRenderPass();
+  void EndRenderPass() { EndRenderPass(RazonDePase::kOtra); }
+  void EndRenderPass(RazonDePase razon);
 
   VkDescriptorSetLayout GetSingleTransientDescriptorLayout(
       SingleTransientDescriptorLayout transient_descriptor_layout) const {

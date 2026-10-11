@@ -1337,6 +1337,12 @@ bool VulkanRenderTargetCache::Resolve(const memory::Memory& memory,
           clear_values[0] = resolve_info.rb_depth_clear;
           clear_values[1] =
               resolve_info.rb_color_clear | (uint64_t(resolve_info.rb_color_clear_lo) << 32);
+#if REX_PLATFORM_SWITCH
+          // Counter 41: this call comes from the guest's resolve command, the rest of the calls to
+          // PerformTransfersAndResolveClears come from Update, that is, from the guest binding a render target as a
+          // texture. Which of the two is making the passes is the question the report's transfer line answers.
+          RexSwitchPerfCount(41);
+#endif
           PerformTransfersAndResolveClears(2, clear_render_targets, clear_transfers_, clear_values,
                                            &clear_rectangle);
         }
