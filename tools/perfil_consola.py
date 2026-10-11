@@ -90,9 +90,12 @@ def numeros(bloque):
 
 
 def main():
+    # La consola de Windows no siempre es UTF-8 (cp1251 en esta maquina) y el texto lleva tildes.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     texto = open(sys.argv[1], encoding="utf-8", errors="ignore").read()
     if "Muestreo de pilas: activo" in texto:
-        print("Muestreo de pilas: ACTIVO (hay atribucion por funcion; pásalo por tools/calientes.py)")
+        print("Muestreo de pilas: ACTIVO (hay atribucion por funcion; pasalo por tools/calientes.py)")
     else:
         print("Muestreo de pilas: desactivado (crea <logs>/rex/perfil_pilas.flag y repite para saber en QUE funcion)")
     print()

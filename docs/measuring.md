@@ -30,6 +30,15 @@ that held up and the mistakes to avoid.
 - **Divide by what really causes the cost.** A stage that is paid per index (each index says which vertex to use
   next) looks eight times more expensive "per draw" in one part of a race than in another, without any code change.
   Use nanoseconds per index, per triangle or per fragment (a pixel being shaded): whatever drives the work.
+- **Weight samples by the CPU of the thread they came from, not by the number of samples.** The console profiler
+  pauses and reads every thread, sleeping ones included, so an idle thread collects as many samples as a busy one. On
+  the first Call of Duty 2 session all fifteen threads had 407 samples each, while their CPU ranged from 0.0 % to
+  96.0 %: pooling the samples put `svcWaitProcessWideKeyAtomic`, `condvarWaitTimeout` and `errno_from_result` — the
+  inside of a sleeping thread — at the top of the list, and the function that really held a core came out third. The
+  per-thread header of each report carries its CPU, and that is the weight. `tools/calientes.py` does this.
+- **A thread that is busy is not necessarily working.** Main XThread of Call of Duty 2 spends 92 % of its time on a
+  single three-instruction loop inside `sub_823800D8`, spinning on a guest flag. That is 100 % of a core and none of
+  it is progress. Before calling the CPU the bottleneck, read what the busy thread is executing.
 - **Only compare the same kind of load.** Menus and loading screens cost half of what driving costs. Averaging a
   whole session inflated the frame rate by almost two frames per second. Use only the intervals of the race where
   the car is moving, and weight them by frames. When two sessions ran over different parts of the map, re-weight them
