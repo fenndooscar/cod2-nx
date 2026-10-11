@@ -8,7 +8,12 @@
 // Built and run by tools/comprobar_bink.ps1, which compiles cod2_video_bink.cpp with COD2_BINK_SIN_SDK so that the
 // part that opens the game's files is left out and nothing of the runtime is needed.
 //
-// Usage: cod2_video_bink_prueba <fichero.bik> <ancho> <alto> <fotogramas> <pistas_audio>
+// Usage: cod2_video_bink_prueba <fichero.bik> <ancho> <alto> <fotogramas> <pistas_audio> [--volcar <carpeta>]
+//
+// With `--volcar` it also decodes the first eight frames in order and writes their three planes, tightly packed, as
+// `nuestro_NN_planoP.bin`. That is the reference tools/comprobar_bink_planos.py compares the console's own dump
+// against: it is the same decoder, so what the comparison proves is the join - the frame descriptor's offsets, the
+// strides and the surface flip - and not the decoder, which tools/comprobar_bink.ps1 already covers.
 #include <algorithm>
 #include <cassert>
 #include <cstdio>
@@ -87,11 +92,33 @@ bool DecodificarFotograma(DescodificadorBink& desc, const std::vector<uint8_t>& 
   return desc.Descodificar(datos.data() + f.inicio + inicio_video, bytes_video, f.clave, salida);
 }
 
+// The three planes of one frame, tightly packed: `ancho` bytes per row, no stride.
+bool VolcarPlanos(const std::string& carpeta, uint32_t n, const Fotograma& f) {
+  for (int p = 0; p < 3; ++p) {
+    const int ancho = p ? (f.ancho + 1) / 2 : f.ancho;
+    const int alto = p ? (f.alto + 1) / 2 : f.alto;
+    char ruta[512];
+    std::snprintf(ruta, sizeof(ruta), "%s/nuestro_%02u_plano%d.bin", carpeta.c_str(), n, p);
+    std::ofstream salida(ruta, std::ios::binary | std::ios::trunc);
+    if (!salida) {
+      return false;
+    }
+    for (int y = 0; y < alto; ++y) {
+      salida.write(reinterpret_cast<const char*>(f.planos[p] + size_t(y) * size_t(f.pasos[p])), ancho);
+    }
+    if (!salida) {
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc != 6) {
-    std::fprintf(stderr, "uso: %s <fichero.bik> <ancho> <alto> <fotogramas> <pistas_audio>\n", argv[0]);
+  if (argc != 6 && !(argc == 8 && std::strcmp(argv[6], "--volcar") == 0)) {
+    std::fprintf(stderr, "uso: %s <fichero.bik> <ancho> <alto> <fotogramas> <pistas_audio> [--volcar <carpeta>]\n",
+                 argv[0]);
     return 2;
   }
   const std::string ruta = argv[1];
@@ -130,6 +157,18 @@ int main(int argc, char** argv) {
 
   DescodificadorBink desc;
   assert(desc.Abrir(cab) && "no se pudo abrir el descodificador");
+
+  // The reference for the join: the first eight frames, in order and from a fresh decoder, which is how the console's
+  // own dump numbers them.
+  if (argc == 8) {
+    for (uint32_t i = 0; i < 8; ++i) {
+      Fotograma f;
+      assert(DecodificarFotograma(desc, datos, indice, pistas_audio, i, f) &&
+             "no se pudo descodificar uno de los ocho primeros fotogramas");
+      assert(VolcarPlanos(argv[7], i, f) && "no se pudo escribir el volcado de un fotograma");
+    }
+    std::printf("volcados los 8 primeros fotogramas a %s\n", argv[7]);
+  }
 
   // Eight frames spread across the movie, the first one included. The first two catch a decoder that ignores its
   // input; the spread catches a frame index that is right at the start and wrong further in.

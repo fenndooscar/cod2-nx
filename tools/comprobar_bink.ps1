@@ -2,6 +2,11 @@
 #
 #   powershell -ExecutionPolicy Bypass -File tools\comprobar_bink.ps1
 #   powershell -ExecutionPolicy Bypass -File tools\comprobar_bink.ps1 -Solo legal.bik
+#   powershell -ExecutionPolicy Bypass -File tools\comprobar_bink.ps1 -Solo legal.bik -Volcar app/out/bink/ref
+#
+# With -Volcar it also writes the first eight frames of each file, tightly packed, as `nuestro_NN_planoP.bin`. That is
+# the reference tools/comprobar_bink_planos.py compares the console's own dump against, so that what gets checked is
+# the join and not the decoder.
 #
 # It compiles app/src/cod2_video_bink.cpp with COD2_BINK_SIN_SDK, so only the container parser and the FFmpeg decoder
 # are built - no runtime, no game image, no NRO - and then runs it over every `.bik` the game ships, parsing each
@@ -20,7 +25,8 @@ param(
     [string]$Juegos = 'assets/game_root',
     [string]$Solo = '',
     [string]$Clang = 'C:\Program Files\LLVM\bin\clang++.exe',
-    [string]$Salida = 'app/out/bink/prueba_bink.exe'
+    [string]$Salida = 'app/out/bink/prueba_bink.exe',
+    [string]$Volcar = ''
 )
 $ErrorActionPreference = 'Stop'
 $raiz = (Split-Path -Parent $PSScriptRoot)
@@ -39,7 +45,9 @@ $tabla = @(
     @('movie_europe.bik', 1280, 720, 3136, 1),
     @('movie_victory.bik', 1280, 720, 1564, 1)
 )
-if ($Solo) { $tabla = $tabla | Where-Object { $_[0] -eq $Solo } }
+# @() matters: with one match the pipeline would unwrap the table to its five fields and the loop below would walk
+# them one by one.
+if ($Solo) { $tabla = @($tabla | Where-Object { $_[0] -eq $Solo }) }
 if (-not $tabla) { throw "no hay ningun fichero que probar en $Juegos" }
 
 foreach ($p in @($Clang, "$ffmpeg/libavcodec/avcodec.h", "$libs/libavcodec.lib", "$libs/libavutil.lib")) {
@@ -74,7 +82,13 @@ $fallos = 0
 foreach ($f in $tabla) {
     $ruta = "$raiz/$Juegos/$($f[0])"
     if (-not (Test-Path $ruta)) { Write-Output "SALTADO  $($f[0]): no esta en $Juegos"; ++$fallos; continue }
-    & $exe $ruta $f[1] $f[2] $f[3] $f[4]
+    if ($Volcar) {
+        $carpeta = Join-Path (Join-Path $raiz $Volcar) ([System.IO.Path]::GetFileNameWithoutExtension($f[0]))
+        New-Item -ItemType Directory -Force $carpeta | Out-Null
+        & $exe $ruta $f[1] $f[2] $f[3] $f[4] '--volcar' $carpeta
+    } else {
+        & $exe $ruta $f[1] $f[2] $f[3] $f[4]
+    }
     if ($LASTEXITCODE) { Write-Output "FALLO    $($f[0]) (exit $LASTEXITCODE)"; ++$fallos }
 }
 if ($fallos) { throw "$fallos fichero(s) no pasaron la comprobacion" }

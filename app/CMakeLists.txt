@@ -28,6 +28,13 @@ set(COD2_SOURCES
     # texture and every read of it faults, which is 58 % (docs/audio-and-video.md). Built by
     # tools/comprobar_bink.ps1 on its own, and not hooked into the game yet.
     src/cod2_video_bink.cpp
+    # What replaces the guest's own Bink: the frame decode of sub_8249F980, written into the surfaces the game's own
+    # frame descriptor names. Cvar `cod2_video_bink_nativo`, on by default.
+    src/cod2_video_bink_nativo.cpp
+    # What the game's own Bink player is handed: the arguments of sub_822D1A30, sub_82496B20, sub_82497D90,
+    # sub_8249F980 and sub_8249DA50, plus a one-off dump of the 17,408-byte context sub_82496B20 returns. This is how
+    # the offsets the hook needs are found rather than guessed; see the file's header. Both cvars are off by default.
+    src/cod2_video_bink_gancho.cpp
 )
 
 if(WIN32)

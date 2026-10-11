@@ -127,7 +127,7 @@ A timeout alone is not enough: the loop must also retry. The code is in `app/src
 
 ## Videos
 
-### Call of Duty 2: not done, and why it is slow
+### Call of Duty 2: the cutscenes, and why they are slow
 
 Everything below is the previous port's work and **none of it is compiled for this game**: `cod2_video_nativo.cpp`,
 `cod2_video_wmv3.cpp` and the rest of the video path are parked in `app/src/aparcado/`. Call of Duty 2's cutscenes are
@@ -154,11 +154,18 @@ a texture. So 58 % of a cutscene's CPU is the exception path (`svcReturnFromExce
 only 8.7 % is the decoder itself (`sub_8249DA50` 5.2 %, `sub_824A2EA0` 3.5 %). The handler is not where the time can be
 won: removing both of its locks is worth about 12 %, which would take 0.46 frames per second to 0.52.
 
-**So replacing the decoder is not enough on its own.** Decoding with FFmpeg removes the 8.7 %; the 58 % stays as long
-as the guest still writes the decoded frame into a watched texture and the port reads it back. What makes a cutscene
-fast is taking the guest out of the frame path - decode natively, upload that frame as the port's own texture and let
-the game's draw of the movie quad find it, which is the shape the previous port's bridge already has
-(`ColaVideo`, `CapturarPlanosVideo`, `AnotarDibujoVideo` in `app/src/aparcado/cod2_video_bridge.h`).
+**The decoder is now replaced, and that is not the whole of the 58 %.** `app/src/cod2_video_bink_nativo.cpp` decodes
+each frame with FFmpeg and writes it into the game's own surfaces, so the guest's decoder - and every read it makes
+of the previous frame - is out of the path. What is left is the exception path itself: the game still uploads that
+surface as a texture, and the watched range is that texture. Whether the 125,434 reads per second were the decoder's
+reference-frame reads or the game's upload copy decides whether this is enough, and only the console can say. The
+measurement to run is the same 10-second reports with `--cod2_video_bink_nativo` on and off; the counter that matters
+is `lecturas emuladas` in the report header.
+
+If it turns out the reads are the upload copy and not the decoder, the next step is the one the previous port's
+bridge already has the shape of - decode natively, upload that frame as the port's own texture and let the game's
+draw of the movie quad find it (`ColaVideo`, `CapturarPlanosVideo`, `AnotarDibujoVideo` in
+`app/src/aparcado/cod2_video_bridge.h`).
 
 FFmpeg's Bink decoder is now enabled for this build (`config_cod2_bink.h`); it was vendored but on in no configuration
 at all. `tools/comprobar_ffmpeg.py` checks that it stays enabled, because a decoder that is not registered makes
@@ -228,17 +235,43 @@ The nine movies, read from their own headers: `IW_logo.bik` 640x480, everything 
 `cod2_attract.bik` are 3,937 frames at 2997/100, the four campaign ones are 1,564 to 3,136 frames at 500000/16683
 (about 30); `legal.bik` is the only one without audio.
 
-**What is still missing is the join.** The decoder is built and checked but nothing calls it: the port does not yet
-know where in the guest's Bink context the compressed frame is, and an offset guessed is worse than no offset. The
-method for finding it is in the header of `app/src/cod2_video_bink_gancho.cpp`: dump the 17,408-byte context the
-game's `sub_82496B20` returns and search it for the bytes the `.bik` file holds, so the answer is the file's own data
-rather than a plausible-looking number.
+**The join**, which is `app/src/cod2_video_bink_nativo.cpp`. The port replaces one function, `sub_8249F980`, which is
+called once per frame from `sub_82497D90` and from nowhere else. Its first argument is the game's own frame
+descriptor, and reading it out of the running game (with the dump `app/src/cod2_video_bink_gancho.cpp` takes) gives
+the whole layout:
+
+| offset | what it is |
+|---|---|
+| `+0x04`, `+0x08` | width, height |
+| `+0x0C`, `+0x10` | width/2, height/2 |
+| `+0x14` | which of the two surfaces is being written |
+| `+0x18`, `+0x48` | the two surfaces, each four 12-byte slots of `(flag, pointer, stride)`: Y, U, V, and a fourth the game leaves null |
+
+The two surfaces are double buffered: `sub_8249F980` flips `+0x14` to the other one when that one's Y pointer is not
+null, writes the three planes into the new surface and reads the old one as the reference frame for motion
+compensation. That is the whole of the guest's frame step, and the hook does the same thing with FFmpeg's planes.
+
+The frame index is in the Bink context, not the descriptor: `sub_82496B20` returns a 17,408-byte context and
+`[context+0x0C]` is the frame about to be decoded, plus one. `[context+184]` is the descriptor.
+
+**It is checked against the guest's own decode, not against a plausible picture.** `tools/comprobar_bink.ps1
+-Volcar` writes the reference - the first eight frames of `legal.bik`, three planes each, tightly packed - and
+`--cod2_video_bink_planos=true` makes the console write what its surfaces actually hold. All 8 frames x 3 planes come
+out byte for byte identical, at the guest's strides (1280 for Y, 768 for a 640-wide chroma plane).
+
+One thing it does not reproduce: `sub_8249F980` returns a byte count that `sub_82497D90` stores in the context at
+`+736`, and `sub_82497990` compares that with `+740` (900 for `legal.bik`). The counter is a running tally inside the
+guest's own bit reader and cannot be recomputed from FFmpeg's output, so the hook reproduces the *branch* instead:
+zero on a keyframe, `+740` on every other frame, which is what the measured values do (`0` on frame 0, then 3600,
+2811, 2638, 2599... all above 900). `sub_82497940`, the only path that reaches the comparison, is reached through the
+Bink function table at `0x8207E670` and was never entered in any run here - it is a seek, and these movies are played
+straight through.
 
 
 
 ### The previous port's videos
 
-The game's cutscenes are [WMV3](glossary.md#wmv3) videos. The game's WMV3 decoder, recompiled from the Xbox 360
+That game's cutscenes are [WMV3](glossary.md#wmv3) videos. The game's WMV3 decoder, recompiled from the Xbox 360
 libraries, took 98 % of a core on the Switch and produced only about 22 frames per second of 720p30 video (1280x720
 at 30 frames per second). So videos stuttered and their audio ended before the picture.
 
