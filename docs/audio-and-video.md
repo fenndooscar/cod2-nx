@@ -127,6 +127,47 @@ A timeout alone is not enough: the loop must also retry. The code is in `app/src
 
 ## Videos
 
+### Call of Duty 2: not done, and why it is slow
+
+Everything below is the previous port's work and **none of it is compiled for this game**: `cod2_video_nativo.cpp`,
+`cod2_video_wmv3.cpp` and the rest of the video path are parked in `app/src/aparcado/`. Call of Duty 2's cutscenes are
+Bink (`.bik`), not [WMV3](glossary.md#wmv3), so the game decodes them itself, with its own recompiled decoder
+(`sub_8249DA50`, 7,984 bytes).
+
+That decoder is not what makes them slow. Measured on the console, handheld, stock clocks, from the 10-second reports
+in `logs/rex/rex_perfil.log`:
+
+| | menu | game | cutscene |
+|---|---|---|---|
+| frames per second | 26.22 | 3.26 | **0.46** |
+| emulated guest reads per second | 8,027 | 299 | **125,434** |
+| ms per second waiting for the GPU | 612 | 852 | **0** |
+
+A cutscene draws two quads per frame and never waits for the GPU, so it is not a graphics problem and lowering the
+render resolution does not touch it. At 0.46 frames per second a frame takes 2.17 s and carries about 322,000 emulated
+reads; the decoded frame is 720x480, which is 345,600 pixels. **One emulated read per pixel.**
+
+The cause is the exception path. Horizon does not let a user process make a page read-only, so "watch this memory for
+CPU writes" is done by unmapping it, and then reads fault as well - the report header says which of the two paths was
+taken: `vigilancia: desmapeo (cada lectura falla)`. The watched range here is the video frame the game has just
+uploaded as a texture, and the Bink decoder reads it back as the reference for the next frame. So 58 % of a cutscene's
+CPU is the exception path (`svcReturnFromException` 34.2 %, `RexResumeTrap` 7.9 %, `RexGmQueryProtect` 7.5 %,
+`RexGmShadowFor` 4.5 %, `RexResumeFromException` 2.6 %, `__libnx_exception_entry` 1.3 %) and only 5.2 % is the decoder
+itself. The handler is not where the time can be won: removing both of its locks is worth about 12 %, which would take
+0.46 frames per second to 0.52.
+
+The fix is to stop the guest from decoding Bink at all, the same way the previous port stopped it from decoding WMV3:
+decode with FFmpeg and hand the game the planes. FFmpeg's Bink decoder is already vendored
+(`sdk/thirdparty/FFmpeg/libavcodec/bink.c`, `binkaudio.c`, `binkdsp.c`, `libavformat/bink.c`) but is enabled in no
+configuration at all - every `config_*.h` builds only `mp3,mp3float,wmav2,xmaframes` with the `asf` and `mp3`
+demuxers. `config_cod2_wmv3.h` is the worked example of enabling a decoder by hand.
+
+To confirm the diagnosis without building anything, rename the four campaign cutscenes on the SD card
+(`game_root/movie_africa.bik`, `movie_eastern.bik`, `movie_europe.bik`, `movie_victory.bik`): if the game carries on
+without them, the cost above disappears with them.
+
+### The previous port's videos
+
 The game's cutscenes are [WMV3](glossary.md#wmv3) videos. The game's WMV3 decoder, recompiled from the Xbox 360
 libraries, took 98 % of a core on the Switch and produced only about 22 frames per second of 720p30 video (1280x720
 at 30 frames per second). So videos stuttered and their audio ended before the picture.
