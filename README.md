@@ -335,7 +335,8 @@ declaring functions inside functions, and one hand-added entry in `app/huecos.to
        pass and synchronisation structure costs *at least* 24.5 ms of a 169.5 ms frame, which is what it costs when
        the passes run back to back with nothing between them. Even at that floor, removing every one of them would
        take 5.9 fps to 6.9. So this is a few per cent and not a multiple: a cost the frame pays for nothing, worth
-       shipping, not the lever. The lever is the 87.4 ms the guest's own draws cost, and that is shading.
+       shipping, not the lever. The 87.4 ms the guest's own draws cost is the lever, and whether that is the game's
+       shading or the emulation path's per-draw structure is what `sin pixels (vista de 1 pixel)` measures.
 
        The arithmetic to beat, and what it says about the plan. At 4.86 FPS a frame is 206 ms. One pass over a
        1280-wide target stores and loads 21 MB of attachment (10.5 of colour and 10.5 of depth) while the render
@@ -460,25 +461,38 @@ declaring functions inside functions, and one hand-added entry in `app/huecos.to
        scale is right is that `si fuera el limite` comes out at the measured frame rate (5.7 against 5.9 fps in the
        round-25 session) instead of 1.6x off it.
        [docs/measuring.md](measuring.md#gpu-timestamps-on-nvk-under-horizon) has the rest;
-       **The measurement came back in the round-25 session and it answers the paragraph above: the GPU work is the
-       whole frame, and 30 fps at 720p is out of reach on this hardware.** In game, `normal`, 5.9 fps: the GPU is
-       busy **175.2 ms of a 169.5 ms frame - 103 % of the wall clock** - and `si fuera el limite` says 5.7 fps. The
-       guest is not the wall (its fence wait is 133.9 ms of the frame, and its own work the rest), and neither is the
-       port's structure: `sin nada`, which removes every category of GPU work at once and leaves the 89.3 render pass
-       ends and the ~277 barrier batches in place, runs at **29.0 fps with the GPU busy 24.5 ms of a 34.5 ms frame**.
-       So the floor under everything the port does on its own is 24.5 ms, and removing all of it would take 5.9 fps
-       to 6.9 - the port's own overhead is 14 % of the frame, not the frame. The A/B deltas say where the rest is, in
+       **The measurement came back in the round-25 session: the GPU work is the whole frame, and the A/B deltas are
+       the budget.** In game, `normal`, 5.9 fps: the GPU is busy **175.2 ms of a 169.5 ms frame - 103 % of the wall
+       clock** - and `si fuera el limite` says 5.7 fps. The guest is not the wall (its fence wait is 133.9 ms of the
+       frame, and its own work the rest), and neither is the port's structure: `sin nada`, which removes every
+       category of GPU work at once and leaves the 89.3 render pass ends and the ~277 barrier batches in place, runs
+       at **29.0 fps with the GPU busy 24.5 ms of a 34.5 ms frame**. So the floor under everything the port does on
+       its own is 24.5 ms, and removing all of it would take 5.9 fps to 6.9. The A/B deltas say where the rest is, in
        GPU milliseconds per frame: **the guest's own draws 87.4**, resolves 63.2, transfers 25.0, texture loads 20.8,
-       the presentation effect 4.8. **The draws alone are 2.6x the 33.3 ms that 30 fps is**, before the port adds
-       anything, and the resolve machinery - the largest single item in the previous round's reading - is second at
-       1.9x. No arrangement of the port's own code fits this frame into 33 ms. The two ways to cut the shading are
-       rendering at a lower internal resolution, which the SDK's `draw_resolution_scale` cannot express (it is an
-       integer from 1 up, and all of `draw_util`, the render target cache and the scaled-resolve path assume that),
-       or a native renderer for this game, which does not exist. The two A/B modes added for this -
-       `sin barrera de memoria compartida` and `sin pixels (vista de 1 pixel)`, see
-       [docs/measuring.md](measuring.md) - are what would overturn the reading if it is wrong: the first keeps every
-       draw and removes only the ~150 whole-buffer shared memory barriers a frame, the second keeps every draw and
-       shades one pixel;
+       the presentation effect 4.8.
+
+       **What those 87.4 ms are is the open question, and it is not the same question as "how many pixels does the
+       game shade".** They are the cost of the guest's draws *as this port's emulation path executes them*: each draw
+       is preceded by a shared memory barrier that ends the render pass, so a draw pays for a store and a load of the
+       whole render area and for a pipeline drain on top of its own shading, and the resolve and transfer machinery
+       the Xbox 360 never needed is charged separately at 63.2 ms. The port of Need for Speed: Most Wanted on this
+       same console, at this same 720p, went from 1-3 fps to 32-35 fps by **deleting that path rather than optimising
+       it** - its renderer reads the game's own Direct3D command ring and records its own Vulkan draws
+       (`docs/performance-history.md`, `docs/native-renderer.md`), and it never touches
+       `sdk/src/graphics/vulkan/` at all. Its GPU work was 60.2 ms per frame when the native renderer first ran at
+       stock clocks, and the changes that brought it to 33 ms and then 23 ms are the ones this port cannot make from
+       inside the emulation: one pass instead of tiling, resolves by swapping images instead of copying, constants
+       through a dynamic uniform buffer. **So "30 fps is out of reach on this hardware" was written before that
+       comparison was made and does not follow from these numbers.** What follows is only that no amount of cutting
+       inside the emulation path reaches 33 ms, which is what the barrier fix above is worth a few per cent of.
+
+       The measurement that settles it is the one already built: `sin pixels (vista de 1 pixel)` keeps every draw
+       with the same pipeline, the same barriers and the same render area and shrinks the viewport to a single pixel.
+       If the frame time barely moves, the 87.4 ms is the per-draw structure and the emulation path is the thing to
+       replace, not to trim. If it collapses towards `sin nada`, the draws cost what their pixels cost and the
+       question becomes whether the shading can be cut. `sin barrera de memoria compartida` separates the barrier
+       command from the pass ends it used to cause, which is the same question asked from the other side;
+
     6. the guest busy-waits, once the GPU work fits;
     7. function ordering (done): `app/orden_funciones.ld` held 555 of the other game's addresses and matched nothing.
        It now holds Call of Duty 2's, regenerated with `tools/calientes.py` from `switch-logs/logs-old-1` — the

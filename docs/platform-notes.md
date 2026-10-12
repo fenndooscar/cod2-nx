@@ -296,6 +296,14 @@ how that driver behaves on the console:
   they interleave with draws and each end drains the pipeline, which can only make it dearer. Even at that floor,
   removing all of it would take 5.9 fps to 6.9, so this is a few per cent rather than a multiple. It is worth
   having because it is a cost the frame pays for nothing; it is not the lever that reaches 30 fps.
+- **The lever is the draws, and the draws are not only their pixels.** The A/B deltas of the same session put the
+  guest's own draws at 87.4 ms of the 169.5 ms frame. That is what a draw costs *through the emulation path* — the
+  barrier in front of it ends the render pass, so it pays a store and a reload of the render area and a pipeline
+  drain on top of what it shades — and the resolve and transfer machinery, 63.2 ms, is charged separately. Reading
+  the 87.4 ms as "the game's shading, therefore 30 fps is impossible" is the mistake to avoid; the port of Need for
+  Speed: Most Wanted on this console at this same 720p removed the emulation path instead of trimming it and went
+  from 1-3 fps to 32-35 fps ([performance-history.md](performance-history.md), [native-renderer.md](native-renderer.md)).
+  `sin pixels (vista de 1 pixel)` in the A/B rotation is what separates the two readings.
 - **What a pass was for matters more than why it ended, because it says who can remove it.** There are two render
   pass entry points and the profiler counts them apart: the one that begins a pass for the guest's own draws
   (counters 44–45) and the one that begins a pass to transfer render target contents or clear a resolved region

@@ -241,12 +241,20 @@ chosen:
    and the ~277 barrier batches still recorded — runs at **29.0 fps with the GPU busy 24.5 ms of a 34.5 ms frame**,
    so everything the port does on its own, with nothing to draw, is 24.5 ms: removing all of the port's own overhead
    would take 5.9 fps to 6.9. The A/B deltas, in GPU milliseconds per frame, are the guest's own draws **87.4**,
-   resolves 63.2, transfers 25.0, texture loads 20.8, the presentation effect 4.8. Against the 33.3 ms that 30 fps
-   is, the guest's shading alone is 2.6× over budget before the port adds anything, and the only lever that scales
-   it is rendering at a lower internal resolution — which `draw_resolution_scale` cannot express, being an integer
-   from 1 up with `draw_util`, the render target cache and the scaled-resolve path all built on that. That is why
-   the two hypothesis-test modes were added (item 5): if either of them moves the frame rate, this reading is wrong
-   and there is a lever left; if neither does, the wall is the shading and the hardware.
+   resolves 63.2, transfers 25.0, texture loads 20.8, the presentation effect 4.8.
+10. **What those deltas mean, and the mistake to avoid with them.** It is tempting to read the 87.4 ms as "what the
+   game's shading costs" and conclude that no port can fit it into the 33.3 ms that 30 fps is. That does not follow.
+   The figure is what the guest's draws cost *as this port's emulation path executes them*, and on a tile-based GPU
+   that path charges each draw a render pass end — a store and a reload of the whole render area, plus a pipeline
+   drain — because of the shared memory barrier in front of it, on top of whatever the draw shades. The resolve and
+   transfer machinery the Xbox 360 never needed is charged separately, at 63.2 ms. So the 87.4 ms is the guest's
+   shading *plus* the emulation path's per-draw structure, and which of the two dominates is a measurement, not an
+   argument. `sin pixels (vista de 1 pixel)` is that measurement: it keeps every draw, every pipeline, every barrier
+   and the render area, and shades one pixel. If the frame time barely moves, the 87.4 ms is structure and the
+   emulation path is what has to be replaced; if it collapses towards `sin nada`, the draws cost what their pixels
+   cost. For scale, the Need for Speed port on this same console at this same 720p started its native renderer with
+   60.2 ms of GPU work per frame at stock clocks and reached 32-35 fps by removing the emulation path outright rather
+   than trimming it (`docs/performance-history.md`).
 
 ## Verifying a change
 
