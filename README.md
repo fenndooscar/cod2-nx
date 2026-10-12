@@ -309,6 +309,27 @@ declaring functions inside functions, and one hand-added entry in `app/huecos.to
        transfer line also separates the calls made by the guest's resolve command (counter 41) from those made by
        binding a render target as a texture, because the two have different fixes.
 
+       **`barrera` is the reason to attack first, and the round-25 session showed how to.** It was 78.1 of the
+       frame's 87.3 pass ends, and a pass end on a tile-based GPU stores the whole tile buffer and loads it back -
+       70.4 ms of a 169.5 ms frame, 42 % of it, for passes that drew nothing. Vulkan does forbid a barrier that
+       includes a non-graphics stage inside a pass begun with `vkCmdBeginRendering`
+       (VUID-vkCmdPipelineBarrier2-None-09553/-09554), which is why `SubmitBarriers` ended the pass for every
+       barrier; but most of these barriers were not that kind. `VulkanSharedMemory::Use` pushes one whenever the
+       guest's use of the shared memory buffer changes between reading and writing, and this guest alternates
+       memexport-capable draws with draws that only read it, so that is roughly once per draw - and because
+       `GetUsageMasks` gave *every* `kRead` the `COMPUTE` and `TRANSFER` stages on the assumption that any read
+       might be a compute dispatch or a buffer copy, every one of those draw-to-draw barriers looked illegal. A
+       draw's read is neither. `Usage::kGuestDrawRead` is the same mask without those two stages, used only where
+       the caller is a guest draw, and `cod2_barreras_en_pase` then records the batch inside the pass when it is
+       provably legal: every barrier's two stage masks non-zero and inside the graphics stages, and no image
+       barrier in the batch at all (an image barrier inside a dynamic rendering pass may not touch an attachment,
+       and the SDK pushes those for the guest's own render-target-as-texture ordering). A transfer, a resolve, a
+       compute write, an image barrier or a caller that asked for the end still ends the pass exactly as before,
+       and on a device without `vertexPipelineStoresAndAtomics` - where a memexport-capable vertex shader becomes
+       a compute shader - `kGuestDrawRead` keeps `COMPUTE` and `TRANSFER` rather than promising something untrue.
+       It is a cvar, so the old behaviour is one line away, and the number to watch is
+       `pases por motivo: barrera`: if it does not drop, no batch was eligible and the change is inert.
+
        The arithmetic to beat, and what it says about the plan. At 4.86 FPS a frame is 206 ms. One pass over a
        1280-wide target stores and loads 21 MB of attachment (10.5 of colour and 10.5 of depth) while the render
        area is the whole EDRAM allocation, and 7 MB once it is the guest's 1280×720; the handheld memory bus moves
@@ -426,8 +447,31 @@ declaring functions inside functions, and one hand-added entry in `app/huecos.to
        reached the queue, and the writer stops rather than lap the reader. `cod2_marca_escala` (default 1.627) is the
        conversion from timestamp units to nanoseconds: NVK reports `timestampPeriod = 1 ns` and it is wrong — the
        counter runs at the SoC's fixed 614.4 MHz, so one unit is 1.627 ns, which is what makes the share of the wall
-       clock come out under 100 % instead of 39 % low. A share above 100 % means the scale is too large;
+       clock come out under 100 % instead of 39 % low. A share above 100 % means the scale is too large — but a
+       couple of points above it does not, because the figure is a submission's span attributed to a presented
+       frame and `normal` runs 1.5 submissions per frame, so a frame boundary lands inside a span; what says the
+       scale is right is that `si fuera el limite` comes out at the measured frame rate (5.7 against 5.9 fps in the
+       round-25 session) instead of 1.6x off it.
        [docs/measuring.md](measuring.md#gpu-timestamps-on-nvk-under-horizon) has the rest;
+       **The measurement came back in the round-25 session and it answers the paragraph above: the GPU work is the
+       whole frame, and 30 fps at 720p is out of reach on this hardware.** In game, `normal`, 5.9 fps: the GPU is
+       busy **175.2 ms of a 169.5 ms frame - 103 % of the wall clock** - and `si fuera el limite` says 5.7 fps. The
+       guest is not the wall (its fence wait is 133.9 ms of the frame, and its own work the rest), and neither is the
+       port's structure: `sin nada`, which removes every category of GPU work at once and leaves the 89.3 render pass
+       ends and the ~277 barrier batches in place, runs at **29.0 fps with the GPU busy 24.5 ms of a 34.5 ms frame**.
+       So the floor under everything the port does on its own is 24.5 ms, and removing all of it would take 5.9 fps
+       to 6.9 - the port's own overhead is 14 % of the frame, not the frame. The A/B deltas say where the rest is, in
+       GPU milliseconds per frame: **the guest's own draws 87.4**, resolves 63.2, transfers 25.0, texture loads 20.8,
+       the presentation effect 4.8. **The draws alone are 2.6x the 33.3 ms that 30 fps is**, before the port adds
+       anything, and the resolve machinery - the largest single item in the previous round's reading - is second at
+       1.9x. No arrangement of the port's own code fits this frame into 33 ms. The two ways to cut the shading are
+       rendering at a lower internal resolution, which the SDK's `draw_resolution_scale` cannot express (it is an
+       integer from 1 up, and all of `draw_util`, the render target cache and the scaled-resolve path assume that),
+       or a native renderer for this game, which does not exist. The two A/B modes added for this -
+       `sin barrera de memoria compartida` and `sin pixels (vista de 1 pixel)`, see
+       [docs/measuring.md](measuring.md) - are what would overturn the reading if it is wrong: the first keeps every
+       draw and removes only the ~150 whole-buffer shared memory barriers a frame, the second keeps every draw and
+       shades one pixel;
     6. the guest busy-waits, once the GPU work fits;
     7. function ordering (done): `app/orden_funciones.ld` held 555 of the other game's addresses and matched nothing.
        It now holds Call of Duty 2's, regenerated with `tools/calientes.py` from `switch-logs/logs-old-1` — the

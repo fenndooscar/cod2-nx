@@ -32,6 +32,7 @@ REXCVAR_DEFINE_BOOL(vulkan_sparse_shared_memory, true, "GPU/Vulkan",
 // Counters for the Switch profiler (switch_perf.cpp).
 extern "C" void RexSwitchPerfCount(unsigned id);
 extern "C" void RexSwitchPerfAdd(unsigned id, uint64_t value);
+extern "C" bool RexSwitchPerfSkip(unsigned bit);
 #endif
 
 namespace rex::graphics::vulkan {
@@ -207,7 +208,21 @@ void VulkanSharedMemory::EndSubmission() {
 void VulkanSharedMemory::Use(Usage usage, std::pair<uint32_t, uint32_t> written_range) {
   written_range.first = std::min(written_range.first, kBufferSize);
   written_range.second = std::min(written_range.second, kBufferSize - written_range.first);
-  assert_true(usage != Usage::kRead || !written_range.second);
+  assert_true((usage != Usage::kRead && usage != Usage::kGuestDrawRead) || !written_range.second);
+#if REX_PLATFORM_SWITCH
+  // cod2 - A/B probe, bit 64 of the report's mode mask: push no barrier at all, keeping only the bookkeeping.
+  // This is not a fix and it is not correct on its own - the guest's memexport writes would not be visible to
+  // the next draw, and the image is expected to be wrong while the mode lasts. It is the one experiment that
+  // tells whether the port's own synchronisation is the frame's wall: the draws keep running, only the
+  // VK_WHOLE_SIZE barrier over the whole shared memory buffer disappears. If the frame time does not move, the
+  // barrier (about 150 per frame, each of which ends the render pass, because Vulkan forbids recording a
+  // barrier inside a pass begun with vkCmdBeginRendering) is innocent and the draws cost what they cost.
+  if (RexSwitchPerfSkip(64)) {
+    last_usage_ = usage;
+    last_written_range_ = written_range;
+    return;
+  }
+#endif
   if (last_usage_ != usage || last_written_range_.second) {
     VkPipelineStageFlags src_stage_mask, dst_stage_mask;
     VkAccessFlags src_access_mask, dst_access_mask;
@@ -369,6 +384,21 @@ void VulkanSharedMemory::GetUsageMasks(Usage usage, VkPipelineStageFlags& stage_
     case Usage::kRead:
       stage_mask |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
       access_mask |= VK_ACCESS_TRANSFER_READ_BIT;
+      break;
+    case Usage::kGuestDrawRead:
+      // cod2 - deliberately nothing more than the graphics stages above. The caller has promised that the
+      // reader is a draw, so there is no compute or transfer reader in flight for this barrier to order, and
+      // keeping the mask graphics-only is what lets the barrier be recorded inside the render pass. The two
+      // stages missing here are the two that would force the pass to end.
+      //
+      // Except when the guest's shaders are not graphics-only after all: a memexport-capable vertex shader is
+      // converted to a compute shader on a device without vertexPipelineStoresAndAtomics, and then the same
+      // draw reads the shared memory from compute. Say so rather than promise something untrue - the barrier
+      // then ends the pass exactly as it did before this change.
+      if (guest_shader_pipeline_stages_ & VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT) {
+        stage_mask |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
+        access_mask |= VK_ACCESS_TRANSFER_READ_BIT;
+      }
       break;
     case Usage::kGuestDrawReadWrite:
       access_mask |= VK_ACCESS_SHADER_WRITE_BIT;

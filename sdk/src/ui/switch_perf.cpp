@@ -199,17 +199,56 @@ struct Mode {
   u32 mask;
   const char* name;
 };
+
+/*
+ * The bits, named, because the aggregate below is written as the union of them: a work-removal mode added with a
+ * literal of its own would leave "sin nada" meaning "all the work except this one", and the report would keep
+ * saying "sin nada" while the floor it measures - the one number the whole rotation exists for - quietly grew.
+ * The names are also what the `RexSwitchPerfSkip` comment at the bottom of this file and the guard sites in
+ * `sdk/src` refer to.
+ */
+constexpr u32 kModoDibujados = 1;
+constexpr u32 kModoTransferencias = 2;
+constexpr u32 kModoResolves = 4;
+constexpr u32 kModoCargasDeTexturas = 8;
+constexpr u32 kModoEfectoDePresentacion = 16;
+constexpr u32 kModoVolcadoDeBaldosas = 32;
+// Hypothesis tests, not work: they take nothing out of the aggregate.
+constexpr u32 kModoBarreraDeMemoriaCompartida = 64;
+constexpr u32 kModoPixels = 128;
+constexpr u32 kModoTodo = kModoDibujados | kModoTransferencias | kModoResolves | kModoCargasDeTexturas |
+                          kModoEfectoDePresentacion | kModoVolcadoDeBaldosas;
+
 constexpr Mode kModes[] = {
     {0, "normal"},
     // Second, not last: this is the report that decides whether the GPU work is the wall at all, and it is the
     // one the round-22 session never reached. Everything after it is only worth reading once this one is known.
-    {63, "sin nada"},
-    {1, "sin dibujados"},
-    {2, "sin transferencias"},
-    {4, "sin resolves"},
-    {8, "sin cargas de texturas"},
-    {16, "sin efecto de presentacion"},
-    {32, "sin despacho por baldosas"},
+    {kModoTodo, "sin nada"},
+    {kModoDibujados, "sin dibujados"},
+    {kModoTransferencias, "sin transferencias"},
+    {kModoResolves, "sin resolves"},
+    {kModoCargasDeTexturas, "sin cargas de texturas"},
+    {kModoEfectoDePresentacion, "sin efecto de presentacion"},
+    // The two dispatch sites the resolve cost is made of: this one is only the dump dispatch (the one that
+    // reads the render target and writes the EDRAM buffer), while "sin resolves" removes it together with the
+    // copy dispatch. The difference between the two reports is what the copy dispatch costs.
+    {kModoVolcadoDeBaldosas, "sin volcado de baldosas"},
+    // The next two are not work removal but hypothesis tests, and they are the ones that decide whether the
+    // port can reach the target frame time at all.
+    //
+    // VulkanSharedMemory::Use pushes a VK_WHOLE_SIZE barrier over the 512 MB shared memory buffer every time the
+    // guest's use of it changes between reading and writing, which the memexport-capable draws do on almost every
+    // draw - about 150 times per frame. Those barriers cannot be recorded inside a render pass begun with
+    // vkCmdBeginRendering (VUID-vkCmdPipelineBarrier2-None-09553/-09554), so each one ends the pass, stores the
+    // tile buffer and loads it back, and drains the pipeline. This mode removes the barrier and nothing else, so
+    // the draws still run: if the frame time collapses, the port's own synchronisation is the wall and narrowing
+    // those masks is the work to do; if it does not move, the draws are what they cost.
+    {kModoBarreraDeMemoriaCompartida, "sin barrera de memoria compartida"},
+    // Every draw still runs, with the same pipeline, the same barriers and the same render area, but the viewport
+    // is one pixel, so the rasteriser shades almost nothing. This is what separates a frame that costs what its
+    // pixels cost from one that costs what its draw calls cost - and therefore whether rendering at a lower
+    // resolution can reach the target at all.
+    {kModoPixels, "sin pixels (vista de 1 pixel)"},
 };
 constexpr size_t kModeCount = sizeof(kModes) / sizeof(kModes[0]);
 
@@ -222,11 +261,14 @@ constexpr size_t kModeCount = sizeof(kModes) / sizeof(kModes[0]);
  *
  * Now the player starts the rotation with L+R+ZL from inside the race, which is the only place where
  * the measurement is useful. From then on it removes one part of the GPU work per report, goes once
- * through the eight modes and returns to "normal".
+ * through the modes and returns to "normal". The last two modes remove nothing - they test a
+ * hypothesis, see the comments on them.
  *
  * How to read it. If with "sin nada" the game is just as slow, the cost is not in the GPU work but
  * in something fixed: submissions, the driver, or the guest itself. If FPS shoots up, the mode where
- * it rises most points to the culprit.
+ * it rises most points to the culprit. "sin nada" keeps the render passes and the barriers, so it
+ * measures the port's structure, not the guest's work: it is the floor of everything the port does
+ * on its own.
  */
 std::atomic<bool> g_ab_activas{false};
 std::atomic<u32> g_skip_mask{0};
@@ -1171,8 +1213,12 @@ void RexSwitchPerfMax(unsigned id, u64 value) {
 }
 
 /*
- * Bits: 1 draws, 2 transfers, 4 resolves, 8 texture loads,
- * 16 presentation effect, 32 tiled dispatch.
+ * Bits: kModoDibujados draws, kModoTransferencias transfers, kModoResolves
+ * resolves, kModoCargasDeTexturas texture loads, kModoEfectoDePresentacion
+ * the presentation effect, kModoVolcadoDeBaldosas the EDRAM tile dumps,
+ * kModoBarreraDeMemoriaCompartida the whole-buffer shared memory barrier in
+ * VulkanSharedMemory::Use, kModoPixels the pixels (a one-pixel viewport).
+ * kModoTodo is the union of the work ones. See kModes for what each is for.
  */
 bool RexSwitchPerfSkip(unsigned bit) {
   return (g_skip_mask.load(std::memory_order_relaxed) & bit) != 0;

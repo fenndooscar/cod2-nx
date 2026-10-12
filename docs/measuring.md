@@ -95,8 +95,12 @@ tells how long the GPU work in between took.
   eight query slots, and read the finished ones back without ever blocking
   (`VK_QUERY_RESULT_WITH_AVAILABILITY_BIT`). The report prints the result as
   `gpu: N ms por fotograma ocupada, M % del tiempo de reloj`. `M` is the self-check: it is the GPU's busy time as a
-  share of the wall clock, so it must come out below 100 %, and if it does not, `cod2_marca_escala` is too large.
-  The scale is a cvar and not a constant because it is a property of the driver, not of the port.
+  share of the wall clock, so it must come out below 100 %. A couple of points above it does not mean the scale is
+  too large, though: the figure is one submission's span attributed to a presented frame, and a game running more
+  than one submission per frame puts a frame boundary inside a span. The stronger check is the one on the same line,
+  `si fuera el limite, el juego iria a N fps`: with the right scale it lands on the measured frame rate, and with a
+  wrong one it is off by the same factor as the error. The scale is a cvar and not a constant because it is a
+  property of the driver, not of the port.
 
 ## Counters that lie
 
@@ -177,17 +181,29 @@ chosen:
 5. **The same question, answered by removing the work instead of by counting it.** Holding **L+R+ZL** in game
    starts a rotation that removes one part of the GPU work per report, in this order: `normal`, `sin nada` (all of
    it), `sin dibujados` (no draws), `sin transferencias`, `sin resolves`, `sin cargas de texturas`, `sin efecto de
-   presentacion`, `sin despacho por baldosas`, and then back to `normal`. Each report says which mode it was in, so
-   the eight modes are eight measurements of the same spot, and the difference between `normal` and `sin nada` is
-   the whole cost of the GPU work. The image is wrong while a mode lasts, which is expected. If `sin nada` is just
-   as slow as `normal`, the cost is not in the work at all but in something fixed (submissions, the driver, the
-   fence waits), and no amount of cutting draws or passes will help. This is the cheapest measurement in this list
-   and the one that has never been run in this port: the round-22 session of 2026-10-12 stopped after five of the
-   eight modes, and `sin nada` was one of the three it never reached.
-   **The reports are five seconds long while the rotation is on** (ten when it is not), so a full cycle is 40 s of
-   holding the buttons rather than 80, and `sin nada` — the one report the whole measurement exists for — comes
-   second rather than last. A five-second report is still tens of frames at these frame rates. The rotation always
-   restarts at `normal`, so an interrupted session does not shift the sequence.
+   presentacion`, `sin volcado de baldosas`, `sin barrera de memoria compartida`, `sin pixels (vista de 1 pixel)`,
+   and then back to `normal`. Each report says which mode it was in, so the modes are measurements of the same spot,
+   and the difference between `normal` and `sin nada` is the whole cost of the GPU work. The image is wrong while a
+   mode lasts, which is expected. If `sin nada` is just as slow as `normal`, the cost is not in the work at all but
+   in something fixed (submissions, the driver, the fence waits), and no amount of cutting draws or passes will help.
+   **The last two modes are not work removal but hypothesis tests**, and they are the ones that decide whether a
+   target frame time is reachable at all:
+   - `sin barrera de memoria compartida` (bit 64) keeps every draw and removes only the `VK_WHOLE_SIZE` barrier that
+     `VulkanSharedMemory::Use` pushes when the guest's use of the shared memory buffer changes between reading and
+     writing — which the memexport-capable draws do on almost every draw, about 150 times a frame. Those barriers
+     cannot be recorded inside a render pass begun with `vkCmdBeginRendering`
+     (VUID-vkCmdPipelineBarrier2-None-09553/-09554), so each one ends the pass, stores the tile buffer, loads it back
+     and drains the pipeline. If the frame time collapses in this mode, the port's own synchronisation is the wall;
+     if it does not move, the draws cost what they cost.
+   - `sin pixels (vista de 1 pixel)` (bit 128) keeps every draw with the same pipeline, the same barriers and the same
+     render area, and only shrinks the viewport to one pixel, so the vertex shaders still run for every vertex and
+     the rasteriser shades almost nothing. This separates a frame that costs what its pixels cost from one that costs
+     what its draw calls cost — and therefore whether rendering at a lower resolution, the only lever that scales the
+     guest's own shading, could ever reach the target.
+   **The reports are five seconds long while the rotation is on** (ten when it is not), so a full cycle is 50 s of
+   holding the buttons, and `sin nada` — the one report the whole measurement exists for — comes second rather than
+   last. A five-second report is still tens of frames at these frame rates. The rotation always restarts at `normal`,
+   so an interrupted session does not shift the sequence.
    What the modes do and do not remove: `RexSwitchPerfSkip` guards the *Vulkan call* at each site, not the work the
    port does to record it (`sdk/src/ui/switch_perf.cpp`, `RexSwitchPerfSkip`). `sin dibujados` therefore still
    reports ~164 draws per frame and `sin resolves` still runs the whole transfer and render-pass machinery. Each
@@ -219,7 +235,19 @@ chosen:
    only way forward is less of it. A share well below that, with `N fps` far above the measured frame rate, means the
    frame is mostly waiting on something that is not GPU execution — a fence that is signalled late, a driver
    round trip, a guest thread — and cutting GPU work will not buy the frame rate it looks like it should. And a share
-   above 100 % means the scale is wrong, not that the GPU is overworked.
+   far above 100 % means the scale is wrong, not that the GPU is overworked.
+9. **The answer, and the budget it leaves.** The round-25 session ran this whole list and the reading is the first
+   case. In game, `normal`, 5.9 fps: the GPU is busy **175.2 ms of a 169.5 ms frame** and `si fuera el limite` says
+   5.7 fps, so the GPU work *is* the frame. `sin nada` — every category of GPU work removed, the 89.3 render pass ends
+   and the ~277 barrier batches still recorded — runs at **29.0 fps with the GPU busy 24.5 ms of a 34.5 ms frame**,
+   so everything the port does on its own, with nothing to draw, is 24.5 ms: removing all of the port's own overhead
+   would take 5.9 fps to 6.9. The A/B deltas, in GPU milliseconds per frame, are the guest's own draws **87.4**,
+   resolves 63.2, transfers 25.0, texture loads 20.8, the presentation effect 4.8. Against the 33.3 ms that 30 fps
+   is, the guest's shading alone is 2.6× over budget before the port adds anything, and the only lever that scales
+   it is rendering at a lower internal resolution — which `draw_resolution_scale` cannot express, being an integer
+   from 1 up with `draw_util`, the render target cache and the scaled-resolve path all built on that. That is why
+   the two hypothesis-test modes were added (item 5): if either of them moves the frame rate, this reading is wrong
+   and there is a lever left; if neither does, the wall is the shading and the hardware.
 
 ## Verifying a change
 

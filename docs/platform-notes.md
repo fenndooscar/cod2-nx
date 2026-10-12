@@ -271,6 +271,24 @@ how that driver behaves on the console:
   the four reasons are the port's own work and not the guest's, and those are the ones that can be removed without
   changing what the game draws. `occlusion_query_enable = false` in `cod2.toml` measures the query share without a
   rebuild, at the cost of the guest reading whatever the query left behind.
+- **A barrier does not have to end the pass, and on this game that is most of them.** Vulkan forbids a barrier that
+  includes a non-graphics stage inside a render pass begun with `vkCmdBeginRendering`
+  (VUID-vkCmdPipelineBarrier2-None-09553/-09554), and `SubmitBarriers` ended the pass for *every* barrier to be safe.
+  In the round-25 session 78.1 of the frame's 87.3 pass ends were that line, and each one stores the tile buffer and
+  loads it back, which is what `pases por motivo: barrera` was counting. Most of those barriers did not need it.
+  `VulkanSharedMemory::Use` pushes one whenever the guest's use of the shared memory buffer changes between reading
+  and writing, and the guest alternates memexport-capable draws with draws that only read it, so that is roughly once
+  per draw; for a draw-to-draw change the masks on both sides are `VERTEX_INPUT | VERTEX_SHADER | FRAGMENT_SHADER`,
+  because `GetUsageMasks` added `COMPUTE` and `TRANSFER` to every `kRead` on the assumption that any read might be a
+  compute or a copy. A draw's read is neither. `Usage::kGuestDrawRead` is the same mask without those two stages, used
+  only where the caller is a guest draw, and `cod2_barreras_en_pase` then keeps the pass open for any batch whose
+  barriers are all graphics-stage and which holds no image barrier (an image barrier inside a dynamic rendering pass
+  may not touch an attachment). Anything else — a transfer, a resolve, a compute write, an image barrier, a caller
+  that asked for the end — ends the pass exactly as before. On a device without
+  `vertexPipelineStoresAndAtomics`, where a memexport-capable vertex shader becomes a compute shader,
+  `kGuestDrawRead` still includes `COMPUTE` and `TRANSFER` rather than promising something untrue. Set
+  `cod2_barreras_en_pase = false` in `cod2.toml` to get the old behaviour back; the number to watch is
+  `pases por motivo: barrera`.
 - **What a pass was for matters more than why it ended, because it says who can remove it.** There are two render
   pass entry points and the profiler counts them apart: the one that begins a pass for the guest's own draws
   (counters 44–45) and the one that begins a pass to transfer render target contents or clear a resolved region

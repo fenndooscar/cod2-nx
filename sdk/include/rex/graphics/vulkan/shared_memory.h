@@ -38,6 +38,15 @@ class VulkanSharedMemory : public SharedMemory {
   enum class Usage {
     // Index buffer, vfetch, compute read, transfer source.
     kRead,
+    // cod2 - the same as kRead, but only when the reader is a guest draw (index buffer and vfetch), never a
+    // compute shader or a buffer copy. Kept apart from kRead because the pipeline barrier they need is not the
+    // same one: a draw reads the shared memory in the vertex input and shader stages only, so a barrier whose
+    // source is a draw read can be recorded inside a render pass begun with vkCmdBeginRendering, while one whose
+    // source may be a compute or transfer read cannot (VUID-vkCmdPipelineBarrier2-None-09553/-09554) and has to
+    // end the pass. On this game that is the difference between 87.3 pass ends per frame and a small fraction of
+    // it, and every pass end stores the tile buffer and loads it back. See GetUsageMasks and
+    // cod2_barreras_en_pase in the Vulkan command processor.
+    kGuestDrawRead,
     // Index buffer, vfetch, memexport.
     kGuestDrawReadWrite,
     kComputeWrite,

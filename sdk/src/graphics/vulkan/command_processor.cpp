@@ -103,6 +103,38 @@ REXCVAR_DEFINE_BOOL(cod2_area_de_dibujo_ajustada, true, "GPU/Vulkan",
                     "instead of the whole EDRAM allocation")
     .lifecycle(rex::cvar::Lifecycle::kHotReload);
 
+// cod2 - record a pipeline barrier inside the render pass instead of ending the pass for it.
+//
+// The failure this addresses is the frame rate, and the evidence is the profile. On this tile-based GPU ending a
+// render pass stores the tile buffer and the next begin loads it back, and the round-25 session measured
+// 87.3 pass ends per frame at about 1.0 ms each - 70.4 ms of a 169.5 ms frame, 42 % of it - with 78.1 of those
+// passes ended for one reason only: so that a pipeline barrier could be recorded. Vulkan forbids a barrier that
+// includes a non-graphics stage (TRANSFER, COMPUTE) inside a pass begun with vkCmdBeginRendering
+// (VUID-vkCmdPipelineBarrier2-None-09553/-09554), and the SDK ends the pass for every barrier to be safe.
+//
+// Most of those barriers do not include a non-graphics stage and never needed the pass ended.
+// VulkanSharedMemory::Use pushes one whenever the guest's use of the shared memory buffer changes between
+// reading and writing, which the memexport-capable draws do on almost every draw, and for a draw-to-draw change
+// its masks are VERTEX_INPUT | VERTEX_SHADER | FRAGMENT_SHADER on both sides (GetUsageMasks, plus
+// guest_shader_pipeline_stages_, which on this GPU has no COMPUTE in it because vertexPipelineStoresAndAtomics
+// is supported). A barrier with graphics stages on both sides is legal inside the pass, so the pass is kept open
+// and the round trip is not paid.
+//
+// This is decided per batch and only when it is provably legal: the batch must hold no image barrier at all (an
+// image barrier inside a dynamic rendering pass may not touch an attachment, and the SDK pushes those for the
+// guest's own render-target-as-texture ordering), and both stage masks of every barrier in it must be non-zero
+// and a subset of the graphics stages. A zero mask becomes TOP_OF_PIPE / BOTTOM_OF_PIPE when it is recorded, and
+// those are not graphics stages. Anything else still ends the pass exactly as before, as does any caller that
+// asked for the end explicitly.
+//
+// What to look for: the report's "pases por motivo" line, where "barrera" is the count this moves. If it does
+// not drop, no batch was eligible and the change is inert. Set cod2_barreras_en_pase to false in cod2.toml next
+// to the .nro to get the old behaviour back without a rebuild.
+REXCVAR_DEFINE_BOOL(cod2_barreras_en_pase, true, "GPU/Vulkan",
+                    "Record a pipeline barrier whose stages are all graphics stages inside the render pass "
+                    "instead of ending the pass for it")
+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
 namespace rex::graphics::vulkan {
 
 namespace {
@@ -3166,28 +3198,61 @@ bool VulkanCommandProcessor::SubmitBarriers(bool force_end_render_pass) {
     }
     return false;
   }
-#if REX_PLATFORM_SWITCH
-  // Counters 46-48. "barrera" is 84 of the frame's 93.5 passes (round-22 report) and each one stores and
-  // reloads the render area, so which barrier is in the batch is what says where to cut. The whole-buffer
-  // shared memory barrier is the one VulkanSharedMemory::Use pushes whenever the guest's use of the shared
-  // memory buffer changes between reading and writing, which with 33.9 texture loads, 33.7 resolves and 175
-  // draws per frame happens constantly. An image-only batch is the guest's own render-target-as-texture and
-  // texture-load ordering, which only the guest can remove. The rest is the port's scratch buffers.
-  {
-    const VkBuffer memoria_compartida =
-        shared_memory_ ? shared_memory_->buffer() : VK_NULL_HANDLE;
-    bool hay_entera = false;
-    bool hay_buffer = false;
-    for (const VkBufferMemoryBarrier& barrera : pending_barriers_buffer_memory_barriers_) {
-      hay_buffer = true;
-      if (barrera.buffer == memoria_compartida && barrera.size == VK_WHOLE_SIZE) {
-        hay_entera = true;
+  // cod2 - keep the pass open when every barrier in this batch is legal inside it. See the note on
+  // cod2_barreras_en_pase: a pass that is ended here stores the tile buffer and the next one loads it back, and
+  // on this game 78.1 of the 87.3 pass ends per frame come from this line. The test is deliberately narrow - no
+  // image barrier at all, and both stage masks non-zero and inside the graphics stages - because the alternative
+  // to being narrow is a corrupted image that takes a console session to find. force_end_render_pass is the
+  // caller asking for the end on purpose, so it still ends.
+  bool barreras_en_el_pase = false;
+  if (REXCVAR_GET(cod2_barreras_en_pase) && !force_end_render_pass && in_render_pass_ &&
+      current_render_pass_ == VK_NULL_HANDLE && pending_barriers_image_memory_barriers_.empty()) {
+    // VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT is in the set so that a batch that already used it is not rejected; the
+    // individual graphics bits are there so that a narrower mask is accepted too.
+    static constexpr VkPipelineStageFlags kEtapasGraficas =
+        VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
+        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
+        VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT | VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT |
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+        VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+        VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
+    barreras_en_el_pase = true;
+    for (const PendingBarrier& barrera : pending_barriers_) {
+      if (!barrera.src_stage_mask || !barrera.dst_stage_mask ||
+          (barrera.src_stage_mask & ~kEtapasGraficas) ||
+          (barrera.dst_stage_mask & ~kEtapasGraficas)) {
+        barreras_en_el_pase = false;
+        break;
       }
     }
-    RexSwitchPerfCount(hay_entera ? 46u : (hay_buffer ? 48u : 47u));
   }
+  if (!barreras_en_el_pase) {
+#if REX_PLATFORM_SWITCH
+    // Counters 46-48. "barrera" was 84 of the frame's 93.5 passes (round-22 report) and each one stores and
+    // reloads the render area, so which barrier is in the batch is what says where to cut. The whole-buffer
+    // shared memory barrier is the one VulkanSharedMemory::Use pushes whenever the guest's use of the shared
+    // memory buffer changes between reading and writing, which with 33.9 texture loads, 33.7 resolves and 175
+    // draws per frame happens constantly. An image-only batch is the guest's own render-target-as-texture and
+    // texture-load ordering, which only the guest can remove. The rest is the port's scratch buffers.
+    //
+    // These count only the batches that really end the pass, because that is what they are read against:
+    // "pases por motivo" counts passes, and a batch that stays inside the pass is not one.
+    {
+      const VkBuffer memoria_compartida =
+          shared_memory_ ? shared_memory_->buffer() : VK_NULL_HANDLE;
+      bool hay_entera = false;
+      bool hay_buffer = false;
+      for (const VkBufferMemoryBarrier& barrera : pending_barriers_buffer_memory_barriers_) {
+        hay_buffer = true;
+        if (barrera.buffer == memoria_compartida && barrera.size == VK_WHOLE_SIZE) {
+          hay_entera = true;
+        }
+      }
+      RexSwitchPerfCount(hay_entera ? 46u : (hay_buffer ? 48u : 47u));
+    }
 #endif
-  EndRenderPass(RazonDePase::kBarrera);
+    EndRenderPass(RazonDePase::kBarrera);
+  }
   for (auto it = pending_barriers_.cbegin(); it != pending_barriers_.cend(); ++it) {
     auto it_next = std::next(it);
     bool is_last = it_next == pending_barriers_.cend();
@@ -4305,7 +4370,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t 
     shared_memory_->Use(VulkanSharedMemory::Usage::kGuestDrawReadWrite,
                         std::make_pair(0u, SharedMemory::kBufferSize));
   } else {
-    shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
+    // cod2 - kGuestDrawRead and not kRead: this draw only reads the shared memory, in the vertex input and
+    // shader stages, and saying so is what keeps the barrier from ending the render pass. See kGuestDrawRead in
+    // shared_memory.h and cod2_barreras_en_pase above. A barrier from a draw read is the one that used to cost
+    // a pass end on almost every draw in this game, because the guest alternates between draws that memexport
+    // and draws that only read.
+    shared_memory_->Use(VulkanSharedMemory::Usage::kGuestDrawRead);
   }
 
   // cod2 - how much of the render target this draw can write, so that the render area is the part of it the
@@ -6055,6 +6125,17 @@ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& v
   }
   viewport.minDepth = viewport_info.z_min;
   viewport.maxDepth = viewport_info.z_max;
+#if REX_PLATFORM_SWITCH
+  // cod2 - A/B probe, bit 128: one pixel of viewport, everything else untouched. The draw is still recorded
+  // with the same pipeline, the same barriers and the same render area, and the vertex shaders still run for
+  // every vertex; only the fragments almost disappear. This is what says whether the frame costs what its
+  // pixels cost or what its draw calls cost, and therefore whether rendering at a lower resolution - the only
+  // lever left that scales the game's own shading - could ever reach the target frame time.
+  if (RexSwitchPerfSkip(128)) {
+    viewport.width = 1.0f;
+    viewport.height = 1.0f;
+  }
+#endif
   SetViewport(viewport);
 
   // Scissor.

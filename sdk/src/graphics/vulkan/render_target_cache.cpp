@@ -6243,7 +6243,13 @@ bool VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dum
       }
       command_processor_.SubmitBarriers(true);
 #if REX_PLATFORM_SWITCH
-      if (!RexSwitchPerfSkip(4))
+      // cod2 - A/B probe, bit 32: skip only this dispatch, keeping the barriers and the passes. Together with
+      // "sin resolves" (bit 4, which removes this one and the copy dispatch) it splits the resolve cost into
+      // what the tile dump costs and what the copy to the shared memory costs. The two are worth separating
+      // because the dump reads the render target image and writes the 10 MB EDRAM buffer, while the copy reads
+      // the EDRAM buffer and writes the shared memory - and the frame does 33 of each, for a total resolve area
+      // of 5.6 screens, which is far too little pixel work to explain what the two modes cost together.
+      if (!RexSwitchPerfSkip(32))
 #endif
       command_buffer.CmdVkDispatch(
           (draw_resolution_scale_x() *
