@@ -71,9 +71,9 @@ set(COD2_SOURCES
     # The packed shader library the two above read (shaders/cod2_empaquetar.cpp writes it).
     src/cod2_shader_library.cpp
     # What the ring does not say about each draw, taken on the game thread: which shader each Direct3D draw
-    # used, and the register-mirror snapshot the marker path compares against. Hooks the shader constructor
-    # (sub_8209BD78); the draw entries are still to be derived, and the file's tail says what they have to
-    # be and why.
+    # used, and the register-mirror snapshot the marker path compares against. Both of this game's hooks are
+    # here - the shader constructor (sub_8209BD78) and the draw submission (sub_82368310, derived in
+    # docs/gancho-dibujos-cod2.md). The file's tail says what is still missing and why.
     src/cod2_nativo_ganchos.cpp
     # The graphics settings the menu offers (F4) that the native renderer honours: post-processing,
     # antialiasing, sky glow and the colour filter, plus the internal resolution and the frame limit, which

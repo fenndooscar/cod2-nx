@@ -211,12 +211,14 @@ Not done, in the order they have to happen:
    Next: identify what the *level* is drawing — the menu and the movies are accounted for, the in-level scene is not.
 6. **Replace the app's game-specific code** (`app/src/cod2_*.cpp`). The previous game's code is parked in
    `app/src/aparcado/` rather than compiled — except the native renderer's core, which is about the hardware and is
-   now built (see item 13). What is left of this item is the game-specific half: the hooks that tell the renderer
-   which shader each draw uses, and the audio server. Both need their addresses re-derived from CoD2's own
-   `default.xex`; [docs/inventario-renderer-nativo.md](docs/inventario-renderer-nativo.md) has the ones for the
-   renderer, and `app/src/cod2_nativo_pendientes.cpp` lists what is still a placeholder. What the renderer still
-   cannot do without the draw entry is identify a *patched* vertex shader exactly: it reuses a pairing it has already
-   seen instead (`UsarIdentidadDelAnillo`).
+   now built (see item 13). What is left of this item is the game-specific half: the audio server, and the parts of
+   the renderer that are reductions rather than rendering. The renderer's two hooks are done and both are this
+   game's own: the shader constructor (`sub_8209BD78`) and the draw submission (`sub_82368310`, derived in
+   [docs/gancho-dibujos-cod2.md](docs/gancho-dibujos-cod2.md)). Still missing: the register marker (the fork's
+   `FlushState` compound packet, which is an optimisation — without it the ring reads the register packets as
+   always) and the shadow-map vegetation filter, whose criteria read the fork's argument order and would skip the
+   wrong draws. `app/src/cod2_nativo_pendientes.cpp` lists what is still a placeholder.
+   [docs/inventario-renderer-nativo.md](docs/inventario-renderer-nativo.md) has the addresses for the rest.
 7. **Run the NRO on the console.** It builds and links, and has never been executed on real hardware: that needs a
    Switch with homebrew enabled. The SD card layout it expects is `sdmc:/switch/cod2-nx/` (see
    [docs/building.md](docs/building.md)).
@@ -433,12 +435,12 @@ declaring functions inside functions, and one hand-added entry in `app/huecos.to
        `sdk/src/ui/rex_app.cpp:342`; the cvar is read from the toml at `sdk/src/ui/rex_app.cpp:174`, before that).
        The code default is still `"xenos"`, so the emulation is one line away. It is not blind either: it identifies
        each draw's shaders from the ring's own `IM_LOAD` packets (`cod2_nativo_sistema.cpp:3355`,
-       `UsarIdentidadDelAnillo`) and draws with them. What is left is the part the audit was actually about — the
-       game's draw entry, which makes that identity exact instead of remembered, and the shader constructor, which is
-       already hooked (`sub_8209BD78`). [docs/inventario-renderer-nativo.md](docs/inventario-renderer-nativo.md) has
-       the addresses for the rest, found in this game's own generated code. Nothing here is a reason to conclude that
-       30 fps at 720p is out of reach; what it is, is a reason the hooks had to be found again before any of it could
-       be exact.
+       `UsarIdentidadDelAnillo`) and draws with them, and it now also leaves a record per draw from this game's own
+       draw submission (`sub_82368310`) and its own shader constructor (`sub_8209BD78`), so a patched vertex shader is
+       identified exactly rather than remembered. What is left is the register marker and the shadow-map vegetation
+       filter. [docs/inventario-renderer-nativo.md](docs/inventario-renderer-nativo.md) and
+       [docs/gancho-dibujos-cod2.md](docs/gancho-dibujos-cod2.md) have the addresses and the derivation. Nothing here
+       is a reason to conclude that 30 fps at 720p is out of reach.
 
        **The GPU is where the frame is, and the port's own resolve machinery is the largest single piece of it.**
        `libnx por segundo` reports how much of every second is spent blocked inside `nvFenceWait` with a non-zero

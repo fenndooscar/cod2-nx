@@ -24,7 +24,19 @@ REXCVAR_DEFINE_BOOL(cod2_nativo_sombra_d3d, false, "COD2",
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 // Phase 2b of the Direct3D-level renderer: see g_dibujo_en_curso and AnotarDibujo below.
-REXCVAR_DEFINE_BOOL(cod2_d3d_marcador_registro, true, "COD2",
+//
+// OFF, and it has to be off until the FlushState half exists. The mechanism is two-sided: the Draw* holds its
+// record (here) and the draw's own FlushState puts it inside the ring, ahead of the DRAW_INDX packet. That
+// second half lives in the parked cod2_d3d_registros_nativo.cpp, and nothing in this tree calls
+// TomarDibujoEnCurso - so with this on, every record is held until the Draw* returns and only then queued,
+// while the ring thread may already have consumed the packet. The window is real: the original ends by calling
+// sub_8236D0D0 after writing the packet (cod2_recomp.32.cpp:25075-25077). The draw would not go wrong - it
+// falls back to the ring's own identity - but the record would arrive too late to be used, which is worse than
+// not having it, because it looks like it works. Off, AnotarDibujo queues the record *before* the original
+// runs, which is the order the ring needs.
+//
+// Turn it on when cod2_d3d_registros_nativo.cpp comes back, not before.
+REXCVAR_DEFINE_BOOL(cod2_d3d_marcador_registro, false, "COD2",
                     "Renderizador nativo (25/09, fase 2b del renderizador a nivel de Direct3D): el marcador del "
                     "FlushState de cada Draw* lleva su registro (VS, PS, argumentos) y el anillo lo usa sin la cola "
                     "ni la busqueda de EmparejarDibujo. Empieza comprobando contra la busqueda y se apaga solo al "
@@ -32,7 +44,13 @@ REXCVAR_DEFINE_BOOL(cod2_d3d_marcador_registro, true, "COD2",
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 // Shadow map vegetation filtered on the game thread (see DecidirVegetacion).
-REXCVAR_DEFINE_BOOL(cod2_d3d_vegetacion_juego, true, "COD2",
+//
+// OFF, and it does nothing at either value today: the only caller DecidirVegetacion ever had is the draw hook in
+// the parked cod2_d3d_trace.cpp, and the draw hook that replaced it (sub_82368310, at the tail of this file) does
+// not call it - its criteria read the count out of the fork's r6/r7 and this game passes an argument struct, so
+// calling it as it stands would skip the wrong draws. Leaving the default at true would say in the log that
+// vegetation is being filtered when nothing is. Re-derive the criteria against the struct, then turn it on.
+REXCVAR_DEFINE_BOOL(cod2_d3d_vegetacion_juego, false, "COD2",
                     "Renderizador nativo (25/09, build 184): los DrawVertices y DrawIndexedVertices que el anillo "
                     "tiraria como vegetacion del mapa de sombras (sin color, con prueba de alfa o descarte) se saltan "
                     "enteros en el hilo del juego: sin FlushState, DRAW_INDX ni registro. Empieza mirando (el anillo "
@@ -77,6 +95,11 @@ std::atomic<uint64_t> g_conocidos_vs{0};
 std::atomic<uint64_t> g_creados_ps{0};
 std::atomic<uint64_t> g_conocidos_ps{0};
 std::atomic<uint32_t> g_avisos{0};
+// The draw hooks' own counters. A hook that never fires and a hook that fires and finds nothing look
+// identical from the ring's side (both end as "sin registro" in the C5b line), and that difference is the
+// whole diagnosis: these two numbers say which it is without another build.
+std::atomic<uint64_t> g_llamadas_dibujo{0};
+std::atomic<uint64_t> g_dibujo_sin_dispositivo{0};
 
 RegistroDibujo g_cola[kTamanoCola];
 std::atomic<uint32_t> g_escritura{0};
@@ -965,6 +988,13 @@ void AnotarVegetacionModelo(uint16_t banderas, const DetalleVegetacion& anillo) 
   vegetacion::Desacuerdo(vegetacion::kQueModelo, banderas, anillo);
 }
 
+void ContarLlamadaDibujo(bool hay_dispositivo) {
+  g_llamadas_dibujo.fetch_add(1, std::memory_order_relaxed);
+  if (!hay_dispositivo) {
+    g_dibujo_sin_dispositivo.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+
 EstadisticasGanchos EstadisticasDeGanchos() {
   EstadisticasGanchos e;
   e.creados_vs = g_creados_vs.load(std::memory_order_relaxed);
@@ -972,13 +1002,15 @@ EstadisticasGanchos EstadisticasDeGanchos() {
   e.creados_ps = g_creados_ps.load(std::memory_order_relaxed);
   e.conocidos_ps = g_conocidos_ps.load(std::memory_order_relaxed);
   e.perdidos = g_perdidos.load(std::memory_order_relaxed);
+  e.llamadas_dibujo = g_llamadas_dibujo.load(std::memory_order_relaxed);
+  e.dibujo_sin_dispositivo = g_dibujo_sin_dispositivo.load(std::memory_order_relaxed);
   return e;
 }
 
 }  // namespace cod2::nativo
 
 /*
- * THE SHADER CONSTRUCTOR, AND WHAT IS STILL MISSING AFTER IT.
+ * THE SHADER CONSTRUCTOR, THE DRAW ENTRY, AND WHAT IS STILL MISSING AFTER BOTH.
  *
  * What stood here was the previous port's three hooks, on its addresses: its pixel shader constructor
  * (sub_8259BC90), its vertex shader constructor (sub_8259C038) and the function that patches a vertex
@@ -987,35 +1019,28 @@ EstadisticasGanchos EstadisticasDeGanchos() {
  * link error at best and, with the addresses declared in overrides.toml, a strong symbol for a function
  * this game never calls at worst.
  *
- * 1. SHADER CREATION - done, below. CoD2 has ONE constructor where the fork had two, and it does not need
- *    to be told the stage: the container says it. See the comment on the hook.
+ * 1. SHADER CREATION - done. CoD2 has ONE constructor where the fork had two, and it does not need to be
+ *    told the stage: the container says it. See the comment on the hook.
  *
- * 2. THE DRAW ENTRIES - still missing, and it is the piece that makes the renderer's identity reliable.
- *    The fork hooked its four Direct3D Draw* entry points and left a record per draw - which vertex and
- *    pixel shader were bound, the primitive type and the four arguments - in a queue the ring drains with
- *    SacarDibujo. Without it the ring is not blind: it identifies the pixel shader from the IM_LOAD packet
- *    itself (the microcode is looked up in the library, ps_actual_) and draws with it
- *    (UsarIdentidadDelAnillo, cod2_nativo_sistema.cpp:3355, and DibujarNativo is called from :2162). What
- *    the record adds is the vertex shader: by the time a patched VS reaches the ring its microcode is not
- *    the container's, so the ring has to remember which object that patched microcode came from
- *    (vs_por_microcodigo_) and, without a record, can only reuse a pairing it has already seen.
- *    CoD2's Direct3D front end is shaped differently (docs/inventario-renderer-nativo.md §1): the per-draw
- *    entry is sub_82368C40, called once per entry by the list walker sub_82368F20, and the draw itself is
- *    sub_82368310, which has exactly one call site in the whole program. Those are the candidates and they
- *    are not the same shape as the fork's, so which one carries the primitive type and the vertex count has
- *    to be read off the code before anything is written - a record with the wrong arguments is worse than
- *    no record, because the ring trusts it: it checks type, count and shaders and draws what it is told.
+ * 2. THE DRAW ENTRY - done. CoD2's Direct3D front end is shaped differently from the fork's four Draw*
+ *    entry points, and what it has instead is a single submission, sub_82368310, whose argument struct is
+ *    the record. The mapping is in the comment on that hook, and docs/gancho-dibujos-cod2.md is the
+ *    specification with the citations. This is the half the ring cannot get any other way: by the time a
+ *    patched vertex shader reaches the ring its microcode is not the container's, so without a record the
+ *    ring can only reuse a pairing it has already seen (UsarIdentidadDelAnillo, cod2_nativo_sistema.cpp:3355).
  *
- * 3. THE REGISTER MARKER - the optimisation, not a requirement. The fork replaced its FlushState's ~7
- *    register packets with one compound marker the ring understands (cod2_d3d_marcador_registro). Without
- *    it the ring reads the register packets the way it always did. CoD2's equivalent of FlushState has not
- *    been identified; docs/inventario-renderer-nativo.md §3.1 marks the changed-register-mask emitter as a
- *    guess and says why, and that is the function this would hang off.
+ * 3. THE REGISTER MARKER - the optimisation, not a requirement, and the only part of the fork's design still
+ *    absent. The fork replaced its FlushState's ~7 register packets with one compound marker the ring
+ *    understands (cod2_d3d_marcador_registro). Without it the ring reads the register packets the way it
+ *    always did. CoD2's equivalent of FlushState has not been identified;
+ *    docs/inventario-renderer-nativo.md §3.1 marks the changed-register-mask emitter as a guess and says why,
+ *    and that is the function this would hang off.
  *
- * Until (2) exists the renderer runs, answers the game's GPU-side expectations and draws through the ring
- * identity, which is what the first milestone needs. The mechanism - the record queue, the record
- * lifecycle, the register-mirror snapshot, the counters - is complete and starts being exercised the
- * moment it arrives.
+ * 4. THE VEGETATION FILTER - present as a mechanism, not yet wired to this game's arguments. The fork skipped
+ *    the shadow-map draws the ring would discard, on the game thread, before they were ever submitted
+ *    (DecidirVegetacion). Its criteria read the count out of the fork's r6/r7, and this game's draw passes a
+ *    struct instead, so the hook records no verdict (vegetacion = 0, which the ring reads as "none") and the
+ *    filter is inert. Re-deriving it against the struct in the draw hook is what turns it back on.
  */
 
 /*
@@ -1058,4 +1083,97 @@ REX_HOOK_RAW(sub_8209BD78) {
   const auto* entrada = detalle::IdentificarCreacion(base, contenedor, vertices);
   __imp__sub_8209BD78(ctx, base);
   detalle::RecordarCreacion(ctx.r3.u32, entrada, vertices);
+}
+
+/*
+ * THE DRAW ENTRY: the two ring writers, not the D3D-level function above them.
+ *
+ * WHY NOT sub_82368310
+ *   docs/gancho-dibujos-cod2.md derives sub_82368310 - the scene renderer's batched submission, called once per
+ *   entry of the technique list its walker sub_82368F20 builds - and recommends hooking it. It is the right
+ *   description of that function and the wrong seam, for two reasons that only a run showed:
+ *
+ *     - It is not the only draw layer. Call of Duty 2 also has a pair of Direct3D-level shims that write the
+ *       ring themselves: sub_820987E8 (indexed) and sub_82098820 (user pointers), each about twenty
+ *       instructions that call a ring writer directly. The cutscenes and the menu go through those, and they
+ *       never touch sub_82368310. A build with only that hook ran 45 s of a cutscene and logged
+ *       "gancho de dibujo: llamadas 0" while the ring counted 2,813 draws.
+ *     - sub_82368310's own retry loop (it re-runs its body while the flag at 31228(r28) is set, which is what
+ *       happens when the ring was full) means one call can emit more than one packet. A record per call is
+ *       then not a record per packet.
+ *
+ * WHY THE RING WRITERS ARE THE SEAM
+ *   Every draw of every layer ends in one of two functions, and each call emits exactly one DRAW_INDX packet:
+ *
+ *     sub_820A7228  the buffer shape:  (ring, primType, baseVertex, baseIndex, indexCount)
+ *     sub_820A6F30  the user-pointer shape, via sub_820A6C18: (ring, primType, firstVertex, vertexCount,
+ *                   indexCount, indexData, ...) with the stride on the caller's stack
+ *
+ *   Both take the primitive in r4 and the index count in r7, and r7 is the number the ring will read: the
+ *   writers build `VGT_DRAW_INITIATOR` as `(count << 16) | 4` (cod2_recomp.2.cpp:821-828,
+ *   cod2_recomp.46.cpp:916-955). So the record is a copy of the arguments, not a re-derivation - there is no
+ *   primitive to translate and no count to recompute, and the clamp-or-wrap difference between the two
+ *   writers is already applied to the value being recorded.
+ *
+ *   The one thing the higher-level function carried that this does not is which of the game's draw calls it
+ *   was; the record only needs the ring's own contract, which is (primitive, count, shaders).
+ *
+ * WHY BEFORE THE ORIGINAL
+ *   The writer is what publishes the packet, so a record queued before the call is in the queue before the
+ *   packet can be seen by the ring thread. The hook changes no PPC register and reads only r4 and r7.
+ *
+ * THE SHADERS COME FROM THE DEVICE
+ *   device = *(guest 0x83630E60), the slot `lis r11,-31901; addi r31,r11,3672; lwz r3,8(r31)` resolves to
+ *   (0x83630E58 + 8), and the same base sub_82368310 uses. sub_82098A88 (SetPixelShader) and sub_82098B10
+ *   (SetVertexShader) write device+0x3290 and device+0x4FD8 before the draw, so reading them here gives this
+ *   draw's pair. It is guest bss and is zero until the device exists, which is what the guard below checks.
+ *
+ * WHAT IS NOT DONE HERE
+ *   - No vegetation verdict. DecidirVegetacion skips shadow-map draws on the game thread before they are
+ *     submitted, and its criteria read the fork's r6/r7 (cod2_nativo_ganchos.cpp:813). At this seam the draw
+ *     has already been built and the decision is too late to save the work, so the record carries
+ *     vegetacion = 0, which the ring reads as "no verdict" (IdentidadParaVegetacion), and
+ *     cod2_d3d_vegetacion_juego is off.
+ *   - No shadow snapshot: the record's `sombra` stays 0 unless cod2_nativo_sombra_d3d is on, which it is not.
+ */
+namespace {
+
+// Shared by both hooks below: the record the ring pairs with the packet this writer is about to emit.
+void AnotarEscrituraDeAnillo(const uint8_t* base, uint32_t primitivas, uint32_t primer_vertice,
+                            uint32_t vertices_o_indice, uint32_t cuenta,
+                            cod2::nativo::FuncionDibujo funcion) {
+  // TEMPORARY: the first few calls are logged whatever the guards say, because "the hook never ran" and "the
+  // hook ran and found no device" are the two possibilities and the counters alone cannot tell them apart.
+  static std::atomic<uint32_t> primeras{0};
+  if (primeras.fetch_add(1, std::memory_order_relaxed) < 4) {
+    REXLOG_INFO("[nativo] gancho de anillo: funcion {} primitivas {} primerVertice {} verticeOIndice {} "
+                "cuenta {} dispositivo {:08X}",
+                int(funcion), primitivas, primer_vertice, vertices_o_indice, cuenta,
+                cod2::nativo::LeerBE(base + 0x83630E60u));
+  }
+  const uint32_t dispositivo = cod2::nativo::LeerBE(base + 0x83630E60u);
+  cod2::nativo::ContarLlamadaDibujo(dispositivo != 0);
+  if (!dispositivo) {
+    return;
+  }
+  cod2::nativo::AnotarDibujo(funcion, base, dispositivo, primitivas, primer_vertice, cuenta,
+                             vertices_o_indice);
+}
+
+}  // namespace
+
+REX_EXTERN(__imp__sub_820A7228);
+REX_HOOK_RAW(sub_820A7228) {  // buffer shape: (ring, primType, baseVertex, baseIndex, indexCount)
+  AnotarEscrituraDeAnillo(base, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32,
+                          cod2::nativo::FuncionDibujo::kIndexados);
+  __imp__sub_820A7228(ctx, base);
+  cod2::nativo::TerminarDibujo();
+}
+
+REX_EXTERN(__imp__sub_820A6F30);
+REX_HOOK_RAW(sub_820A6F30) {  // user-pointer shape: (ring, primType, firstVertex, vertexCount, indexCount, ...)
+  AnotarEscrituraDeAnillo(base, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32,
+                          cod2::nativo::FuncionDibujo::kIndexadosUP);
+  __imp__sub_820A6F30(ctx, base);
+  cod2::nativo::TerminarDibujo();
 }

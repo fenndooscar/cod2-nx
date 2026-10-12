@@ -27,39 +27,21 @@ REXCVAR_DEFINE_STRING(cod2_resolucion_interna, "automatico", "Graficos",
     .allowed({"automatico", "1280x720", "1920x1080", "1024x576", "640x360", "640x480"});
 
 /*
- * GPU MHz in handheld mode.
+ * cod2_switch_gpu_mhz and cod2_switch_ram_1600 are NOT defined here.
  *
- * The console starts games at 307.2 MHz. Nintendo later made a 460.8 MHz profile available for
- * the games that need it, and this one does: 25 FPS with the GPU at its limit. This is not an
- * overclock (no KIP or sysmodule is touched): it is requested through the official API (apm), the
- * same one any commercial game uses. Not every game requests it because the ones that do not
- * need it get longer battery life.
+ * They were, and this file spent a while parked; while it was, cod2_rendimiento.cpp re-declared them so
+ * that the console profile would come back on its own. Unparking this file brought the second definition
+ * back with it, and on the Switch that is silent: the link line carries --allow-multiple-definition
+ * (tools/switch/cmake/switch-devkitA64.cmake), so one of the two wins by link order and the build says
+ * nothing. It only showed up when the PC build was turned on for the first time, as a duplicate-symbol
+ * error - which is also the only reason it was noticed at all.
  *
- * 307.2 -> 460.8 is +50 % GPU. It costs battery and heat; with 0 the console stays
- * exactly as it was.
+ * cod2_rendimiento.cpp keeps them: it is the file that was written after the park, and it carries the
+ * newer decision (cod2_switch_ram_1600 defaults to true - commit ed54808). The same applies to the apm
+ * request itself, which AplicarAjustesGraficos used to make a second time.
  *
- * How to check that it worked: the profiler reports the real frequency in every report
- * ("relojes: CPU 1020.0 MHz, GPU 307.2 MHz, ..."). If it still says 307.2, it did not take effect.
+ * tools/comprobar_cvars_unicos.py fails if this ever comes back.
  */
-REXCVAR_DEFINE_INT32(cod2_switch_gpu_mhz, 460, "Graficos",
-                     "Switch: MHz de GPU que se piden al sistema en portatil (0 = no tocar nada, 384, "
-                     "460). 460,8 MHz es un perfil oficial de Horizon, no un overclock; gasta mas "
-                     "bateria y calienta mas")
-    .allowed({"0", "384", "460"});
-
-/*
- * The trade-off, just in case.
- *
- * The high GPU configurations come in two flavors: memory at 1331.2 (0x92220008) and memory at
- * 1600 (0x92220007). We want the first, because raising the RAM clock costs battery and heat
- * without giving anything back: our measurements put bandwidth at 27 %, and what saturates is the
- * fragment ALU. If this firmware lacks it, the default is to leave the GPU as it was rather than
- * raise the RAM clock. With this set to true the trade-off is accepted: high GPU with RAM at 1600.
- */
-REXCVAR_DEFINE_BOOL(cod2_switch_ram_1600, false, "Graficos",
-                    "Switch: aceptar el perfil de GPU alta aunque suba la memoria a 1600 MHz. Por "
-                    "defecto NO: si no hay ninguno que deje la RAM donde estaba, la GPU se queda como "
-                    "estaba. El log [apm] dice cual entro");
 
 REXCVAR_DEFINE_BOOL(cod2_switch_saltynx, true, "Graficos",
                     "Switch: publica los FPS y la resolucion donde los leen los overlays de la consola "
@@ -275,10 +257,9 @@ void AplicarAjustesGraficos() {
   // FPS and resolution for the console overlays, and honoring Reverse-NX. Can be turned off if it gets in the way.
   RexSwitchSaltyNxHabilitar(REXCVAR_GET(cod2_switch_saltynx) ? 1 : 0);
   RexSwitchRelojesReverseHabilitar(REXCVAR_GET(cod2_switch_relojes_reverse) ? 1 : 0);
-  // GPU profile in handheld mode. See cod2_switch_gpu_mhz.
-  RexSwitchApmPedirGpuMhz(REXCVAR_GET(cod2_switch_gpu_mhz));
-  RexSwitchApmPermitirRam1600(REXCVAR_GET(cod2_switch_ram_1600) ? 1 : 0);
-  RexSwitchApmAplicar();
+  // The apm profile is NOT requested here: cod2_rendimiento.cpp's AplicarRendimiento does it once, from
+  // OnPreSetup, and it also owns cod2_switch_gpu_mhz and cod2_switch_ram_1600. Asking twice is harmless
+  // but leaves two places to look when the clock does not move.
   RexSwitchPerfIntervaloSwap(unsigned(REXCVAR_GET(cod2_intervalo_swap)));
 #endif
   Poner("resolution", "");  // empty preset: the width and height above apply

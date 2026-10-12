@@ -5,12 +5,12 @@
 // emulation plugin is never loaded: OnPreSetup fills config.graphics, and ReXApp::SetupPresentation only
 // looks at gpu_plugin when that is empty (sdk/src/ui/rex_app.cpp:342). See docs/native-renderer.md.
 //
-// The renderer it starts is complete as a Vulkan backend and complete enough as a Call of Duty 2 renderer
-// to draw: it answers the game's GPU-side expectations (the MMIO registers, the ring read pointer, vblank,
-// GPU writes to memory, occlusion queries) and identifies each draw's shaders from the ring's own IM_LOAD
-// packets. The shader constructor is hooked, so the vertex shader is identified too. What is still missing
-// is the game's draw entry, which is what makes that identity exact instead of remembered, and it is listed
-// with what it has to provide at the tail of src/cod2_nativo_ganchos.cpp.
+// The renderer it starts is complete as a Vulkan backend and complete enough as a Call of Duty 2 renderer to
+// draw: it answers the game's GPU-side expectations (the MMIO registers, the ring read pointer, vblank, GPU
+// writes to memory, occlusion queries), identifies each draw's shaders from the ring's own IM_LOAD packets,
+// and takes an exact record of each draw from this game's own hooks - the shader constructor (sub_8209BD78)
+// and the draw submission (sub_82368310). What is still missing is the register marker (an optimisation) and
+// the shadow-map vegetation filter, and both are listed at the tail of src/cod2_nativo_ganchos.cpp.
 
 #pragma once
 
@@ -30,6 +30,7 @@
 #include <thread>
 #include <vector>
 
+#include "cod2_ajustes_graficos.h"
 #include "cod2_nativo_sistema.h"
 #include "cod2_perfil_pc.h"
 #include "cod2_pc_simbolos.h"
@@ -193,6 +194,18 @@ class Cod2App : public rex::ReXApp {
   //  command line and cod2.toml still take precedence.
   // ==========================================================================
   void OnPostInitLogging() override {
+    // The graphics settings that work with the native renderer. Both calls lost their caller when the
+    // renderer was parked (commit af5a0ab deleted the line; the file went to src/aparcado/), and the file
+    // has now come back - so the calls come back with it. They are not cosmetic:
+    //   AplicarAjustesGraficos  internal resolution and FPS limit into the video mode before the game asks
+    //                           for it, the console overlays, and the perf interval.
+    //   OcultarAjustesSinEfecto removes from the F4 menu what does nothing under the native renderer.
+    //   VigilarAjustesEnVivo    what makes AntialiasingFxaa(), ResplandorCielo(), TratamientoVisual() and
+    //                           VersionPosproceso() return anything: the renderer reads all four
+    //                           (cod2_nativo_destinos.cpp), and without the watcher they are always off.
+    cod2::ajustes::AplicarAjustesGraficos();
+    cod2::ajustes::OcultarAjustesSinEfecto();
+    cod2::ajustes::VigilarAjustesEnVivo();
     // Without a GPU plugin the screen stays black: the game runs, but the
     // runtime discards its graphics calls with "no GPU emulation loaded".
     PonerSiNadieLoPidio("gpu_plugin", "xenos");

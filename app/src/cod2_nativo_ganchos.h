@@ -4,10 +4,13 @@
 // The vertex shader microcode reaches the ring already patched by D3D: reordered fetches, swizzles from
 // the vertex declaration, and outputs the pixel shader does not read nulled out (measured on PC). Looking
 // it up in the library by content is not reliable. The exact identity is on the game thread:
-//   - The shader constructors (sub_8259BC90 PS, sub_8259C038 VS) receive the original container and
-//     return the object: object -> container.
-//   - Each D3D Draw* reads the bound VS and PS from the device and leaves a record in a queue. The ring
-//     sink pairs each draw with its record, in the same order, checking primitive type and count.
+//   - The shader constructor (sub_8209BD78, one function for both stages) receives the original container
+//     and returns the object: object -> container.
+//   - The draw submission (sub_82368310) reads the bound VS and PS from the device and leaves a record in a
+//     queue, before it writes the DRAW_INDX packet. The ring sink pairs each draw with its record, in the
+//     same order, checking primitive type and count.
+// Both addresses are this game's; the fork's (two constructors, four Draw* entry points) do not exist here.
+// docs/gancho-dibujos-cod2.md is the derivation of the second one.
 
 #pragma once
 
@@ -18,11 +21,24 @@ namespace cod2::nativo {
 class ShadersNativos;
 struct EntradaShader;
 
+// Which shape of draw the record describes. The values and their order are the fork's and the ring switches
+// on them; the comments are not. Call of Duty 2 produces only the two indexed shapes, and the record's four
+// words are copied from the arguments of the two functions every draw of every layer ends in - the ring
+// writers sub_820A7228 (buffers) and sub_820A6F30 (user pointers), see cod2_nativo_ganchos.cpp:
+//
+//   args[0] = the primitive, taken from the writer's r4 (4, kTriangleList - the value the ring will carry,
+//             not a translation; the game never varies it)
+//   args[1] = first vertex / base vertex    args[2] = index count    args[3] = vertex count
+//
+// args[2] is the one the ring reads as VGT_DRAW_INITIATOR >> 16, for both shapes
+// (cod2_nativo_sistema.cpp, CuentaDelRegistro). The other two are diagnostics. The two enum values that are
+// left over are kept only because the enum is switched on; nothing in this port produces them.
+// docs/gancho-dibujos-cod2.md is the specification for the layer above the writers.
 enum class FuncionDibujo : uint8_t {
-  kVertices,      // DrawVertices(dispositivo, tipo, inicio, cuenta)
-  kIndexados,     // DrawIndexedVertices(dispositivo, tipo, base, inicio, cuenta)
-  kVerticesUP,    // DrawVerticesUP(dispositivo, tipo, cuenta, datos, zancada)
-  kIndexadosUP,   // DrawIndexedVerticesUP: argument order unconfirmed
+  kVertices,      // not produced by this game
+  kIndexados,     // the buffer shape: DrawIndexedPrimitive
+  kVerticesUP,    // not produced by this game
+  kIndexadosUP,   // the user-pointer shape: DrawIndexedPrimitiveUP
 };
 
 struct RegistroDibujo {
@@ -128,7 +144,7 @@ bool TomarDibujoEnCurso(RegistroDibujo& registro);
 uint32_t DecidirModoDibujo();
 // After writing (or not) the marker: to the queue if it does not go in the marker, or if it goes in check mode.
 void EntregarDibujo(const RegistroDibujo& registro, uint32_t modo, bool en_marcador);
-// From the Draw* hooks, after the original: if its FlushState did not take the record, to the queue.
+// From the draw hook, after the original: if its FlushState did not take the record, to the queue.
 void TerminarDibujo();
 // Ring thread only, with a marker record the draw accepts: whether it gives the same shaders as the usual lookup.
 // que: 1 the lookup's record gives different ones, 3 the lookup finds nothing and the identity gives different
@@ -191,6 +207,10 @@ struct EstadisticasGanchos {
   uint64_t creados_ps = 0;
   uint64_t conocidos_ps = 0;
   uint64_t perdidos = 0;  // records that did not fit in the queue
+  // The draw hooks' own counters. "The hook never fired" and "the hook fired and found nothing" both reach
+  // the ring as the same thing (a draw with no record), and these are what tell them apart.
+  uint64_t llamadas_dibujo = 0;         // calls into the two ring writers, i.e. packets emitted
+  uint64_t dibujo_sin_dispositivo = 0;  // the device global was still zero
 };
 
 // The native system enables them after loading the library; nullptr disables them.
@@ -200,8 +220,12 @@ void ActivarGanchos(ShadersNativos* shaders);
 // (cod2_nativo_dibujos.cpp).
 const ShadersNativos* BibliotecaActiva();
 
-// From the Draw* hooks (cod2_d3d_trace.cpp), before the original.
-// vegetacion = the kVeg* flags from DecidirVegetacion for the record (0 = no verdict).
+// From the draw hooks, on entry, before anything else: the one way they can find nothing.
+void ContarLlamadaDibujo(bool hay_dispositivo);
+
+// From the draw hooks (cod2_nativo_ganchos.cpp, on the two ring writers), before the original. r4..r7 fill
+// args[0..3]; see FuncionDibujo above for what this game puts in them.
+// vegetacion = the kVeg* flags from DecidirVegetacion for the record (0 = no verdict; what this game passes).
 void AnotarDibujo(FuncionDibujo funcion, const uint8_t* base, uint32_t dispositivo, uint32_t r4,
                   uint32_t r5, uint32_t r6, uint32_t r7, uint16_t vegetacion = 0);
 

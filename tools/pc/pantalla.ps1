@@ -51,7 +51,11 @@ $lienzo.Dispose()
 
 $carpeta = Split-Path -Parent $Salida
 if ($carpeta -and -not (Test-Path $carpeta)) { New-Item -ItemType Directory -Path $carpeta -Force | Out-Null }
-$completo = Join-Path (Get-Location) $Salida
+# Join-Path does not know an absolute path when it sees one: Join-Path C:\repo C:\otro\f.png gives
+# C:\repo\C:\otro\f.png, and Bitmap::Save then throws "The given path's format is not supported" - after the
+# capture has already been taken, so the screen is lost and only the error is left. An absolute -Salida is
+# the obvious thing to pass, so it has to work.
+$completo = if ([System.IO.Path]::IsPathRooted($Salida)) { $Salida } else { Join-Path (Get-Location) $Salida }
 $mapa.Save($completo, [System.Drawing.Imaging.ImageFormat]::Png)
 $mapa.Dispose()
 

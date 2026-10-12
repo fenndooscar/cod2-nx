@@ -3377,17 +3377,26 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
     return huella_vs_;
   }
 
+  // Which of the record's four words is the number the ring reads as `VGT_DRAW_INITIATOR >> 16`, per function.
+  // These are not the inherited meanings: CoD2's hook fills the record from its own argument struct and puts
+  // the index count in args[2] for BOTH of the functions it produces (docs/gancho-dibujos-cod2.md §3.4, §5).
+  // The inherited arms read args[3] for kIndexados and args[1] for kVerticesUP, which are the other game's
+  // argument orders; had they stayed, every record would have failed the count check and every draw would
+  // have fallen back to UsarIdentidadDelAnillo with no error anywhere.
+  //
+  // kVertices and kVerticesUP are kept because the enum has them and the ring switches on it, but CoD2's draw
+  // hook never produces them: the only draw shape this game has is indexed. The arms are marked dead rather
+  // than left to look meaningful.
   static uint32_t CuentaDelRegistro(const RegistroDibujo& r) {
     switch (r.funcion) {
-      case FuncionDibujo::kVertices:
-        return r.args[2];  // r6: vertex count
       case FuncionDibujo::kIndexados:
-        return r.args[3];  // r7: index count
-      case FuncionDibujo::kVerticesUP:
-        return r.args[1];  // r5: vertex count
       case FuncionDibujo::kIndexadosUP:
+        return r.args[2];  // index count = primitive count * 3 (the hook's own arithmetic, §5)
+      case FuncionDibujo::kVertices:    // never produced by this game's hook
+        return r.args[2];
+      case FuncionDibujo::kVerticesUP:  // never produced by this game's hook
       default:
-        return r.args[3];  // r7: index count (unconfirmed)
+        return r.args[2];
     }
   }
 
@@ -4481,12 +4490,14 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
                   "con VS={} con PS={}; registros con shaders distintos de los IM_LOAD={} "
                   "(dibujos que se quedan sin registro por eso={}); dibujos con la identidad "
                   "del anillo={}; variantes VS={} "
-                  "(longitud distinta {}, elementos sin fetch {})",
+                  "(longitud distinta {}, elementos sin fetch {}); "
+                  "gancho de dibujo: llamadas {} sin dispositivo {}",
                   g.creados_vs, g.conocidos_vs, g.creados_ps, g.conocidos_ps,
                   dibujos_emparejados_, dibujos_sin_registro_, registros_saltados_, g.perdidos,
                   dibujos_con_vs_, dibujos_con_ps_, candidatos_incoherentes_,
                   dibujos_incoherentes_, dibujos_por_im_load_, variantes_vistas_.size(),
-                  variantes_longitud_distinta_, elementos_sin_fetch_);
+                  variantes_longitud_distinta_, elementos_sin_fetch_,
+                  g.llamadas_dibujo, g.dibujo_sin_dispositivo);
     }
     if (!histograma_anotado_ && swaps_.load() >= 60) {
       histograma_anotado_ = true;
