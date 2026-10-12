@@ -45,14 +45,15 @@ set(COD2_SOURCES
     # This is the same design as the port of Need for Speed: Most Wanted (docs/native-renderer.md), and these
     # files are that port's, moved out of src/aparcado/. They are the parts that turned out to be about the
     # *hardware* and not about the game: the PM4 ring, the Xenos register file, the EDRAM, the Vulkan device,
-    # the texture pool. Between them they contain four references to a guest address, and three of those are
-    # in comments.
+    # the texture pool. Measured before they were moved: not one of them contains a real guest-address
+    # reference - no REX_EXTERN(, no REX_HOOK, no __imp__sub_ - and all 37 textual sub_XXXXXXXX occurrences
+    # are in comments and log strings.
     #
-    # What is NOT here is the other game's glue: the hooks on its Direct3D device, its shader constructors, its
-    # hot renderer functions, its shadow and LOD reductions. Those are game-specific by nature and are being
-    # written again for Call of Duty 2 in src/cod2_nativo_ganchos.cpp and its neighbours. Until they exist the
-    # renderer runs and records nothing, which is what the first milestone (the game boots without the
-    # emulation and the screen shows a test colour) needs.
+    # What is NOT here is the other game's glue: the hooks on its Direct3D device, its draw entries, its hot
+    # renderer functions, its shadow and LOD reductions. Those are game-specific by nature and are being
+    # written again for Call of Duty 2 in src/cod2_nativo_ganchos.cpp and its neighbours. The renderer draws
+    # without them, identifying each draw's shaders from the ring's own IM_LOAD packets; what they add is the
+    # exact identity and the game-side reductions.
     #
     # The cvar is cod2_renderizador: "xenos" (default) loads the SDK's emulation, "nativo" takes the app's own
     # graphics system. See src/cod2_app.h.

@@ -128,3 +128,23 @@ void AnotarComprobacionMarcador(bool igual, uint32_t secuencia, uint32_t registr
 // from a Draw* hook; the renderer only reads it, to report how many game frames went by between two
 // reports. With no Draw* hook it stays at zero, and the report says so.
 std::atomic<uint64_t> g_cod2_fotogramas_juego{0};
+
+/*
+ * Two more things that are the other game's and are harmless only because of where they sit. Both are
+ * checked, not assumed:
+ *
+ *   - cod2_nativo_ganchos.h's kMarcadorMagia is 0x4E465300, which spells "NFS": the previous game's
+ *     initials. The ring looks for it on every PM4_NOP (cod2_nativo_sistema.cpp:1333) to recognise the
+ *     compound register marker its own FlushState hook writes. That hook does not exist for this game, so
+ *     nothing writes the magic, and the only way a stray NOP could be taken for a marker is if the game
+ *     happened to emit a NOP whose first word begins with the ASCII "NFS" - and even then the marker is
+ *     validated in full before anything is applied (ProcesarMarcador: the spans have to be consistent),
+ *     and a malformed one only turns the marker path off. Worth renaming to "COD" when the marker path is
+ *     ported; not worth a commit on its own, because the value never leaves the port.
+ *
+ *   - cod2_microcodigo_versiones.h tracks which microcode a shader constructor wrote. It is driven by the
+ *     fetch patcher hook (sub_825A2FB8 in the fork), which has not been re-derived for this game, so the
+ *     ring's "IM_LOAD without memcmp" shortcut (cod2_nativo_im_load_sin_memcmp) compares the microcode
+ *     instead of trusting the version counter. That is the slower but always-correct path, and the cvar
+ *     exists to turn it off explicitly.
+ */

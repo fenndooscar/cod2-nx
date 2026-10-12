@@ -50,3 +50,37 @@
 #  If it ever looks wrong (ghosting, things that are not cleared, leftovers
 #  from the previous frame), try "rov" and compare.
 render_target_path_d3d12 = "rtv"
+
+
+# ----------------------------------------------------------------------------
+#  Which renderer draws the game
+# ----------------------------------------------------------------------------
+#
+#  WHAT IT IS
+#    "xenos"   ReXGlue's emulated Xbox 360 GPU. It records the game's PM4
+#              commands and replays them through the SDK's Vulkan backend.
+#    "nativo"  the port's own renderer (app/src/cod2_nativo_*.cpp). It answers
+#              the same MMIO registers the game polls, reads the same ring, and
+#              draws with its own pipelines and its own EDRAM emulation.
+#
+#  WHY "nativo" IS THE DEFAULT HERE
+#  The emulated path is a dead end for this port and was dropped deliberately:
+#  it is the reason the game runs at 5-6 fps in a level on the console, because
+#  the EDRAM that made the Xbox 360's resolves and overdraw free is paid for
+#  twice on this hardware. No amount of cutting inside that path fits the frame
+#  into 33 ms. See README.md item 13.
+#
+#  HOW TO GO BACK
+#  Set it to "xenos" and restart. Both paths are compiled into the same NRO:
+#  this line is the whole switch, and it is the escape hatch if the native
+#  renderer misbehaves on the console.
+#
+#  WHAT TO EXPECT FROM "nativo" RIGHT NOW
+#  It boots and it draws, identifying each draw's shaders from the ring's own
+#  IM_LOAD packets. It is not finished: the game's draw entry is still to be
+#  derived, so a patched vertex shader is identified by remembering a pairing
+#  rather than by looking it up, and the game-side reductions (shadow-map
+#  vegetation, the register marker) are not there. If the screen is black with
+#  "nativo" and fine with "xenos", the log to send is rex/rex_perfil.log plus
+#  every "[nativo]" line: that is what says which of the two it is.
+cod2_renderizador = "nativo"

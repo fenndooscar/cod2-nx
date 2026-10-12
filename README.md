@@ -52,7 +52,7 @@ than WMV3, and the shaders live **inside compressed fastfiles** rather than in f
 | `mesa/` — the NVK driver patch and its build script | Reusable as is |
 | `shaders/` — XenosRecomp, the 2005 shader container reader, the packer, the WebAssembly tools | Reusable; the container format matches |
 | `tools/` — third-party fetch, direct calls, gap finder, literal copies, build scripts | Reusable; game-specific addresses come from configuration |
-| `app/` — the CMake project and the renderer skeleton | The project builds and the NRO links. The native renderer's **core** is compiled and reachable with `cod2_renderizador = "nativo"`; its **hooks** are still the other game's and are parked |
+| `app/` — the CMake project and the renderer skeleton | The project builds and the NRO links. The native renderer is compiled and **is what the shipped settings select** (`cod2_renderizador = "nativo"` in `app/cod2.toml`; the code default is still `"xenos"`, so the emulation stays one line away). The game-side reductions are still the other game's and are parked |
 
 ## State of this fork
 
@@ -427,16 +427,18 @@ declaring functions inside functions, and one hand-added entry in `app/huecos.to
        a real guest-address reference** — no `REX_EXTERN(`, no `REX_HOOK`, no `__imp__sub_`; all 37 textual
        `sub_XXXXXXXX` occurrences are in comments and log strings.
 
-       So the core is now compiled, and `cod2_renderizador = "nativo"` starts it instead of the Xenos emulation
-       (`app/src/cod2_app.h`'s `OnPreSetup` fills `config.graphics`, which is the SDK's own substitution point —
-       `ReXApp::SetupPresentation` only loads the plugin when it is empty, `sdk/src/ui/rex_app.cpp:342`). It is not
-       blind either: it identifies each draw's shaders from the ring's own `IM_LOAD` packets
-       (`cod2_nativo_sistema.cpp:3355`, `UsarIdentidadDelAnillo`) and draws with them. What is left is the part the
-       audit was actually about — the game's draw entry, which makes that identity exact instead of remembered, and
-       the shader constructor, which is already hooked (`sub_8209BD78`).
-       [docs/inventario-renderer-nativo.md](docs/inventario-renderer-nativo.md) has the addresses for the rest, found
-       in this game's own generated code. Nothing here is a reason to conclude that 30 fps at 720p is out of reach;
-       what it is, is a reason the hooks had to be found again before any of it could be exact.
+       So the core is now compiled, and `app/cod2.toml` ships with `cod2_renderizador = "nativo"`, which starts it
+       instead of the Xenos emulation (`app/src/cod2_app.h`'s `OnPreSetup` fills `config.graphics`, which is the
+       SDK's own substitution point — `ReXApp::SetupPresentation` only loads the plugin when it is empty,
+       `sdk/src/ui/rex_app.cpp:342`; the cvar is read from the toml at `sdk/src/ui/rex_app.cpp:174`, before that).
+       The code default is still `"xenos"`, so the emulation is one line away. It is not blind either: it identifies
+       each draw's shaders from the ring's own `IM_LOAD` packets (`cod2_nativo_sistema.cpp:3355`,
+       `UsarIdentidadDelAnillo`) and draws with them. What is left is the part the audit was actually about — the
+       game's draw entry, which makes that identity exact instead of remembered, and the shader constructor, which is
+       already hooked (`sub_8209BD78`). [docs/inventario-renderer-nativo.md](docs/inventario-renderer-nativo.md) has
+       the addresses for the rest, found in this game's own generated code. Nothing here is a reason to conclude that
+       30 fps at 720p is out of reach; what it is, is a reason the hooks had to be found again before any of it could
+       be exact.
 
        **The GPU is where the frame is, and the port's own resolve machinery is the largest single piece of it.**
        `libnx por segundo` reports how much of every second is spent blocked inside `nvFenceWait` with a non-zero

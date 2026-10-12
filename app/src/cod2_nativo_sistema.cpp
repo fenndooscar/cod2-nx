@@ -1,4 +1,4 @@
-﻿// cod2 - native renderer, part C1: the app's own graphics system.
+// cod2 - native renderer, part C1: the app's own graphics system.
 //
 // What it does
 //   Replaces the Xenos emulation plugin when cod2_renderizador is
@@ -106,9 +106,9 @@ std::string Resumen();
 #endif
 
 REXCVAR_DEFINE_STRING(cod2_renderizador, "xenos", "COD2",
-                      "xenos = emulacion de la GPU; nativo = renderizador nativo en desarrollo "
-                      "(pieza C1: el juego corre sin emulacion y la pantalla muestra un color de "
-                      "prueba)")
+                      "xenos = emulacion de la GPU; nativo = renderizador nativo del port, que dibuja "
+                      "identificando los shaders de cada dibujo en los IM_LOAD del anillo. En "
+                      "app/cod2.toml viene puesto \"nativo\"")
     .allowed({"xenos", "nativo"})
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
