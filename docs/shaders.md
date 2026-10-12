@@ -11,11 +11,20 @@
 
 ## From the disc to the GPU
 
-1. **Find the shaders on the disc.** They are stored in "containers" inside the game's data files and its executable.
-   A scanner looks at every byte position for the container signature (`10 2A 0E 00` for pixel shaders, `10 2A 0E 01`
-   for vertex shaders), and accepts a match when its header sizes make sense. This game has 204 containers on the disc
-   and 3 in the executable. They are named in the order they are found (`p_000123`, `v_000124`), with one counter for
-   all files, so the order of the scan must never change.
+1. **Find the shaders on the disc.** They are stored in "containers" inside the game's data files. A scanner looks
+   at every byte position for the container signature (`10 2A 0E 00` for pixel shaders, `10 2A 0E 01` for vertex
+   shaders), and accepts a match when its header sizes make sense. They are named in the order they are found
+   (`p_000123`, `v_000124`), with one counter for all files, so the order of the scan must never change.
+   **For Call of Duty 2 the containers are not loose files**: they are assets inside the `.ff`
+   [fastfiles](glossary.md#fastfile), which are a 20-byte big-endian header followed by one zlib stream at `+0x14`.
+   `shaders/cod2_buscar_contenedores.cpp` walks loose files and cannot see them; `tools/extraer_shaders.py` inflates
+   each fastfile first and writes the containers out. Measured over the retail game: **111 fastfiles, none
+   unreadable, 7,508 container occurrences and 1,124 distinct** (653 pixel, 471 vertex). `snd.ff` and `mp_snd.ff`
+   hold none, and `code.ff` and `mp_code.ff` are the same file twice.
+   This step was the other game's numbers until now — it read "204 containers on the disc and 3 in the executable",
+   which is Need for Speed: Most Wanted's. `README.md`'s "108 valid Xenos shader containers" is not reproducible
+   either: no single fastfile has 108, and `common.ff`, the largest source of shared shaders, has 100 distinct.
+   [shaders/README.md](../shaders/README.md) has the full accounting and what was verified.
 2. **Convert the container format.** This game uses the 2005 container format: a 24-byte header with flags, virtual
    size and physical size, then where the definitions (+12), the constant table (+16) and the microcode (+20) start.
    XenosRecomp expects the later 2008 format, so a small converter rewrites the header first. Older Xbox 360 games
