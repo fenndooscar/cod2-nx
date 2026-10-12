@@ -289,6 +289,13 @@ how that driver behaves on the console:
   `kGuestDrawRead` still includes `COMPUTE` and `TRANSFER` rather than promising something untrue. Set
   `cod2_barreras_en_pase = false` in `cod2.toml` to get the old behaviour back; the number to watch is
   `pases por motivo: barrera`.
+  **How much that is worth is bounded, and the bound is not the pass count.** The frame does 87.3 pass ends and
+  every one of them, plus every barrier batch, is still recorded in `sin nada` — where the GPU busy time is
+  24.5 ms of a 34.5 ms frame. So the pass and synchronisation structure costs *at least* 24.5 ms of a 169.5 ms
+  frame, which is what it costs when the passes run back to back with nothing between them; in the real frame
+  they interleave with draws and each end drains the pipeline, which can only make it dearer. Even at that floor,
+  removing all of it would take 5.9 fps to 6.9, so this is a few per cent rather than a multiple. It is worth
+  having because it is a cost the frame pays for nothing; it is not the lever that reaches 30 fps.
 - **What a pass was for matters more than why it ended, because it says who can remove it.** There are two render
   pass entry points and the profiler counts them apart: the one that begins a pass for the guest's own draws
   (counters 44–45) and the one that begins a pass to transfer render target contents or clear a resolved region

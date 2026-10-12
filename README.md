@@ -310,8 +310,8 @@ declaring functions inside functions, and one hand-added entry in `app/huecos.to
        binding a render target as a texture, because the two have different fixes.
 
        **`barrera` is the reason to attack first, and the round-25 session showed how to.** It was 78.1 of the
-       frame's 87.3 pass ends, and a pass end on a tile-based GPU stores the whole tile buffer and loads it back -
-       70.4 ms of a 169.5 ms frame, 42 % of it, for passes that drew nothing. Vulkan does forbid a barrier that
+       frame's 87.3 pass ends, and a pass end on a tile-based GPU stores the whole tile buffer and loads it back,
+       so those 78.1 passes are round trips to memory that draw nothing. Vulkan does forbid a barrier that
        includes a non-graphics stage inside a pass begun with `vkCmdBeginRendering`
        (VUID-vkCmdPipelineBarrier2-None-09553/-09554), which is why `SubmitBarriers` ended the pass for every
        barrier; but most of these barriers were not that kind. `VulkanSharedMemory::Use` pushes one whenever the
@@ -329,6 +329,13 @@ declaring functions inside functions, and one hand-added entry in `app/huecos.to
        a compute shader - `kGuestDrawRead` keeps `COMPUTE` and `TRANSFER` rather than promising something untrue.
        It is a cvar, so the old behaviour is one line away, and the number to watch is
        `pases por motivo: barrera`: if it does not drop, no batch was eligible and the change is inert.
+
+       **What that fix can be worth, before anyone expects 30 fps from it.** All 87.3 pass ends and every barrier
+       batch are still recorded in `sin nada`, and the GPU busy time there is 24.5 ms of a 34.5 ms frame - so the
+       pass and synchronisation structure costs *at least* 24.5 ms of a 169.5 ms frame, which is what it costs when
+       the passes run back to back with nothing between them. Even at that floor, removing every one of them would
+       take 5.9 fps to 6.9. So this is a few per cent and not a multiple: a cost the frame pays for nothing, worth
+       shipping, not the lever. The lever is the 87.4 ms the guest's own draws cost, and that is shading.
 
        The arithmetic to beat, and what it says about the plan. At 4.86 FPS a frame is 206 ms. One pass over a
        1280-wide target stores and loads 21 MB of attachment (10.5 of colour and 10.5 of depth) while the render

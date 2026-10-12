@@ -106,11 +106,11 @@ REXCVAR_DEFINE_BOOL(cod2_area_de_dibujo_ajustada, true, "GPU/Vulkan",
 // cod2 - record a pipeline barrier inside the render pass instead of ending the pass for it.
 //
 // The failure this addresses is the frame rate, and the evidence is the profile. On this tile-based GPU ending a
-// render pass stores the tile buffer and the next begin loads it back, and the round-25 session measured
-// 87.3 pass ends per frame at about 1.0 ms each - 70.4 ms of a 169.5 ms frame, 42 % of it - with 78.1 of those
-// passes ended for one reason only: so that a pipeline barrier could be recorded. Vulkan forbids a barrier that
-// includes a non-graphics stage (TRANSFER, COMPUTE) inside a pass begun with vkCmdBeginRendering
-// (VUID-vkCmdPipelineBarrier2-None-09553/-09554), and the SDK ends the pass for every barrier to be safe.
+// render pass stores the tile buffer and the next begin loads it back, and the round-25 session measured 87.3
+// pass ends per frame, 78.1 of them ended for one reason only: so that a pipeline barrier could be recorded.
+// Vulkan forbids a barrier that includes a non-graphics stage (TRANSFER, COMPUTE) inside a pass begun with
+// vkCmdBeginRendering (VUID-vkCmdPipelineBarrier2-None-09553/-09554), and the SDK ends the pass for every barrier
+// to be safe.
 //
 // Most of those barriers do not include a non-graphics stage and never needed the pass ended.
 // VulkanSharedMemory::Use pushes one whenever the guest's use of the shared memory buffer changes between
@@ -130,6 +130,15 @@ REXCVAR_DEFINE_BOOL(cod2_area_de_dibujo_ajustada, true, "GPU/Vulkan",
 // What to look for: the report's "pases por motivo" line, where "barrera" is the count this moves. If it does
 // not drop, no batch was eligible and the change is inert. Set cod2_barreras_en_pase to false in cod2.toml next
 // to the .nro to get the old behaviour back without a rebuild.
+//
+// What it can be worth, so that it is not oversold: all 87.3 pass ends and every barrier batch are still recorded
+// in the "sin nada" mode, and the GPU busy time there is 24.5 ms of a 34.5 ms frame. So the pass and
+// synchronisation structure costs *at least* 24.5 ms of a 169.5 ms frame - that is what it costs when the passes
+// run back to back with nothing between them, and in the real frame they interleave with draws and each end drains
+// the pipeline, which can only make it dearer. Even at that floor, removing every one of them would take 5.9 fps
+// to 6.9, so this is a few per cent rather than a multiple: a cost the frame pays for nothing, not the lever that
+// reaches 30 fps. The lever is the 87.4 ms the guest's own draws cost. The two numbers that settle it are the
+// report's "pases por motivo: barrera" and the frame rate of the session after this change.
 REXCVAR_DEFINE_BOOL(cod2_barreras_en_pase, true, "GPU/Vulkan",
                     "Record a pipeline barrier whose stages are all graphics stages inside the render pass "
                     "instead of ending the pass for it")

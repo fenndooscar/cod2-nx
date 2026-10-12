@@ -188,13 +188,12 @@ chosen:
    in something fixed (submissions, the driver, the fence waits), and no amount of cutting draws or passes will help.
    **The last two modes are not work removal but hypothesis tests**, and they are the ones that decide whether a
    target frame time is reachable at all:
-   - `sin barrera de memoria compartida` (bit 64) keeps every draw and removes only the `VK_WHOLE_SIZE` barrier that
+   - `sin barrera de memoria compartida` (bit 64) keeps every draw and removes only the barrier command that
      `VulkanSharedMemory::Use` pushes when the guest's use of the shared memory buffer changes between reading and
-     writing — which the memexport-capable draws do on almost every draw, about 150 times a frame. Those barriers
-     cannot be recorded inside a render pass begun with `vkCmdBeginRendering`
-     (VUID-vkCmdPipelineBarrier2-None-09553/-09554), so each one ends the pass, stores the tile buffer, loads it back
-     and drains the pipeline. If the frame time collapses in this mode, the port's own synchronisation is the wall;
-     if it does not move, the draws cost what they cost.
+     writing — which the memexport-capable draws do on almost every draw. Since `cod2_barreras_en_pase` (see
+     [platform-notes.md](platform-notes.md)) most of those barriers no longer end the render pass, so this mode now
+     removes one thing rather than two: the barrier command itself. If the frame time collapses in this mode, the
+     synchronisation is still the wall; if it does not move, the draws cost what they cost.
    - `sin pixels (vista de 1 pixel)` (bit 128) keeps every draw with the same pipeline, the same barriers and the same
      render area, and only shrinks the viewport to one pixel, so the vertex shaders still run for every vertex and
      the rasteriser shades almost nothing. This separates a frame that costs what its pixels cost from one that costs

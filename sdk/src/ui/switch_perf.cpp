@@ -236,13 +236,13 @@ constexpr Mode kModes[] = {
     // The next two are not work removal but hypothesis tests, and they are the ones that decide whether the
     // port can reach the target frame time at all.
     //
-    // VulkanSharedMemory::Use pushes a VK_WHOLE_SIZE barrier over the 512 MB shared memory buffer every time the
+    // VulkanSharedMemory::Use pushes a VK_WHOLE_SIZE barrier over the shared memory buffer every time the
     // guest's use of it changes between reading and writing, which the memexport-capable draws do on almost every
-    // draw - about 150 times per frame. Those barriers cannot be recorded inside a render pass begun with
-    // vkCmdBeginRendering (VUID-vkCmdPipelineBarrier2-None-09553/-09554), so each one ends the pass, stores the
-    // tile buffer and loads it back, and drains the pipeline. This mode removes the barrier and nothing else, so
-    // the draws still run: if the frame time collapses, the port's own synchronisation is the wall and narrowing
-    // those masks is the work to do; if it does not move, the draws are what they cost.
+    // draw. This mode removes the barrier command and nothing else, so the draws still run: it is the experiment
+    // that says whether the barrier command itself costs anything, once cod2_barreras_en_pase has stopped those
+    // barriers from ending the render pass. If the frame time does not move, the barrier is innocent and the
+    // draws are what they cost. Before that setting existed this mode removed the pass ends too, and so measured
+    // two changes at once.
     {kModoBarreraDeMemoriaCompartida, "sin barrera de memoria compartida"},
     // Every draw still runs, with the same pipeline, the same barriers and the same render area, but the viewport
     // is one pixel, so the rasteriser shades almost nothing. This is what separates a frame that costs what its

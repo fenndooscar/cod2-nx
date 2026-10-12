@@ -213,10 +213,11 @@ void VulkanSharedMemory::Use(Usage usage, std::pair<uint32_t, uint32_t> written_
   // cod2 - A/B probe, bit 64 of the report's mode mask: push no barrier at all, keeping only the bookkeeping.
   // This is not a fix and it is not correct on its own - the guest's memexport writes would not be visible to
   // the next draw, and the image is expected to be wrong while the mode lasts. It is the one experiment that
-  // tells whether the port's own synchronisation is the frame's wall: the draws keep running, only the
-  // VK_WHOLE_SIZE barrier over the whole shared memory buffer disappears. If the frame time does not move, the
-  // barrier (about 150 per frame, each of which ends the render pass, because Vulkan forbids recording a
-  // barrier inside a pass begun with vkCmdBeginRendering) is innocent and the draws cost what they cost.
+  // tells whether the port's own synchronisation is the frame's wall, once cod2_barreras_en_pase has already
+  // stopped those barriers from ending the render pass: the draws keep running and only the barrier command over
+  // the shared memory buffer disappears. If the frame time does not move, the barrier command itself is innocent
+  // and the draws cost what they cost. Before that setting existed, this mode also removed the pass ends the
+  // barriers caused, so it was two changes at once; it is now one.
   if (RexSwitchPerfSkip(64)) {
     last_usage_ = usage;
     last_written_range_ = written_range;
