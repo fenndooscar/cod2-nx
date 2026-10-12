@@ -965,71 +965,34 @@ EstadisticasGanchos EstadisticasDeGanchos() {
 
 }  // namespace cod2::nativo
 
-// The constructors and the fetch patcher report what they write into the microcode (IM_LOAD without
-// memcmp, see cod2_microcodigo_versiones.h).
-#include "cod2_microcodigo_versiones.h"
-
-// The experimental library (cod2_shader_hooks.cpp) hooks the same constructors; with it enabled these
-// are not compiled.
-#if !defined(COD2_NATIVE_SHADER_LIBRARY)
-// r3 = original container; they return the object in r3. The original is always called and no PPC
-// register is touched.
-REX_EXTERN(__imp__sub_8259BC90);
-REX_HOOK_RAW(sub_8259BC90) {  // pixel shader
-  const auto* entrada =
-      cod2::nativo::ganchos_detalle::IdentificarCreacion(base, ctx.r3.u32, false);
-  __imp__sub_8259BC90(ctx, base);
-  cod2::nativo::ganchos_detalle::RecordarCreacion(ctx.r3.u32, entrada, false);
-  cod2::nativo::microcodigo::AvisarCreacion(base, ctx.r3.u32, false);
-}
-
-REX_EXTERN(__imp__sub_8259C038);
-REX_HOOK_RAW(sub_8259C038) {  // vertex shader
-  const auto* entrada = cod2::nativo::ganchos_detalle::IdentificarCreacion(base, ctx.r3.u32, true);
-  __imp__sub_8259C038(ctx, base);
-  cod2::nativo::ganchos_detalle::RecordarCreacion(ctx.r3.u32, entrada, true);
-  cod2::nativo::microcodigo::AvisarCreacion(base, ctx.r3.u32, true);
-}
-#endif
-
 /*
- * The VS fetch patcher reports what it writes (IM_LOAD without memcmp, see cod2_microcodigo_versiones.h).
- * sub_825A2FB8(r3 device, r4 VS, r5 destination, r6 declaration) writes the patched fetches to r5.
- *   - In place (r5 = [VS+40], from sub_825A3AF0): bumps the versions of that microcode's slot before and
- *     after writing.
- *   - On the ring's copy (from sub_825A37D8, return 0x825A38D0): not memory of any IM_LOAD; only counted.
- *   - Any other call: also bumps the destination's versions, but is counted separately and the ring turns
- *     off the shortcut.
- * Careful: the two calls in the generated code must go to sub_825A2FB8 and not to __imp__sub_825A2FB8
- * (cod2_recomp.58.cpp and cod2_recomp.124.cpp, changed by a patch; tools/llamadas_directas.py already
- * handles them because this address appears here). If the one from sub_825A3AF0 went to __imp__, this
- * hook would not see the in-place patches and the ring's guard would stay in the observing phase (or
- * switch off with DIFERENCIA).
- * It changes no PPC register.
+ * THE HOOKS ARE NOT HERE YET, AND THAT IS THE WORK THAT IS LEFT.
+ *
+ * What stood here was the previous port's three hooks, on its addresses: its pixel shader constructor
+ * (sub_8259BC90), its vertex shader constructor (sub_8259C038) and the function that patches a vertex
+ * shader's fetch constants before they reach the ring (sub_825A2FB8). None of the three exists in Call of
+ * Duty 2 (src/aparcado/README.md, docs/inventario-renderer-nativo.md), so keeping them would have been a
+ * link error at best and, with the addresses declared in overrides.toml, a strong symbol for a function
+ * this game never calls at worst.
+ *
+ * What has to go here, and why, is unchanged from the previous port, because it is about Direct3D and not
+ * about the game:
+ *
+ *   1. CoD2's two shader constructors, hooked the same way: r3 is the original container on entry and the
+ *      created object on return, so the hook reads the container, calls the original, and records
+ *      object -> container. The ring looks the microcode it reads up in that map and gets the identity
+ *      back. Nothing else identifies a shader reliably: by the time a vertex shader reaches the ring,
+ *      Direct3D has reordered its fetches, applied the vertex declaration's swizzles, and nulled the
+ *      outputs the pixel shader does not read.
+ *   2. CoD2's Draw* entry points (DrawVertices, DrawIndexedVertices, the UP variants), hooked so that each
+ *      one leaves a record of the bound vertex and pixel shader in a queue. The ring pairs each draw it
+ *      reads with the next record and checks the primitive type and the vertex count before trusting it,
+ *      so a mismatch costs a missed draw and not a wrong one.
+ *   3. CoD2's FlushState equivalent, if it has one, for the marker path (cod2_d3d_marcador_registro). The
+ *      marker is an optimisation: without it the ring reads the register packets the way it always did.
+ *
+ * Until those exist the renderer runs, answers the game's GPU-side expectations and records no draws,
+ * which is what the first milestone needs. The mechanism above - the record queue, the record lifecycle,
+ * the register-mirror snapshot, the counters - is complete and starts being exercised the moment the
+ * hooks arrive.
  */
-REX_EXTERN(__imp__sub_825A2FB8);
-REX_HOOK_RAW(sub_825A2FB8) {
-  namespace mc = cod2::nativo::microcodigo;
-  const uint32_t destino = ctx.r5.u32;
-  const uint32_t vs = ctx.r4.u32;
-  const uint32_t retorno = uint32_t(ctx.lr);
-  const bool en_su_sitio = vs != 0 && mc::LeerInvitado32(base, vs + 40) == destino;
-  if (!en_su_sitio && retorno == 0x825A38D0u) {
-    mc::Contar(mc::g_parches_en_copia);
-    __imp__sub_825A2FB8(ctx, base);
-    return;
-  }
-  const uint32_t ranura = mc::RanuraDe(mc::Fisica(destino) & ~uint32_t(3));
-  mc::EmpezarEscritura(ranura);
-  __imp__sub_825A2FB8(ctx, base);
-  // The counts, before TerminarEscritura's global++: a ring that sees the new global value already sees
-  // them.
-  if (en_su_sitio) {
-    mc::Contar(mc::g_parches_en_su_sitio);
-  } else {
-    mc::g_otro_retorno.store(retorno, std::memory_order_relaxed);
-    mc::g_otro_destino.store(destino, std::memory_order_relaxed);
-    mc::Contar(mc::g_parches_otros);
-  }
-  mc::TerminarEscritura(ranura);
-}

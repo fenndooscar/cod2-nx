@@ -197,13 +197,17 @@ The game's [shaders](glossary.md#shader) are Xbox 360 [microcode](glossary.md#mi
 `cod2_shaders.nfsp` has them translated to [SPIR-V](glossary.md#spir-v) (see [shaders.md](shaders.md)). The
 installer page builds it in the browser from the disc; you only need this step to build it on your PC.
 
-```sh
-shaders/cod2_regenerar_biblioteca_pcf.sh out/library /path/to/extracted/containers
+```powershell
+powershell -ExecutionPolicy Bypass -File shaders\cod2_regenerar_biblioteca.ps1
 ```
 
-The containers (the files that hold the shaders) are taken out of the disc files by
-`shaders/cod2_buscar_contenedores.cpp` ("find containers"). For Call of Duty 2 they are inside the `.ff` [fastfiles](glossary.md#fastfile),
-which are zlib streams and have to be inflated first.
+It needs clang++ on `PATH` and DXC and spirv-val from the Vulkan SDK, and it leaves the library next to the NRO
+(`app/out/sw8/cod2_shaders.nfsp`). `shaders/README.md` says what each step does and what is verified.
+
+The containers (the files that hold the shaders) are taken out of the disc files. For Call of Duty 2 they are not
+loose files: they are assets inside the `.ff` [fastfiles](glossary.md#fastfile), which are a 20-byte big-endian
+header followed by a single zlib stream. `tools/extraer_shaders.py` inflates them and writes the containers out;
+the `.sh` pipeline below starts from that folder and needs MinGW g++ and bash instead.
 
 ## 8. Copy it to the SD card
 
@@ -213,11 +217,12 @@ The NRO expects this layout, the same one the installer page makes:
 sdmc:/switch/cod2-nx/
     cod2-nx.nro         the NRO, renamed
     cod2.toml           the startup settings (cvars)
+    cod2_shaders.nfsp   the shader library (built from the game data; not distributed)
     game_root/          the files of the disc, loose
 ```
 
-`tools/preparar_sd.ps1` ("prepare SD") builds that tree for you, from the built NRO, `app/cod2.toml` and
-`assets/game_root`:
+`tools/preparar_sd.ps1` ("prepare SD") builds that tree for you, from the built NRO, `app/cod2.toml`,
+`assets/game_root` and the shader library:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\preparar_sd.ps1 -Destino E:\
@@ -237,9 +242,11 @@ Three things that are not obvious:
   mapped whole into RAM, because Horizon has no file `mmap`
   (`sdk/src/core/mapped_memory_switch.cpp`, cap 256 MB), and the game's ISO is about 7 GB. The extracted folder is
   read with `pread` instead and has no such limit.
-- **`cod2_shaders.nfsp` is not needed by this build.** It belongs to the native shader library, which is parked in
-  `app/src/aparcado/` and not compiled (step 7 above). The NRO draws through the SDK's emulated Xbox 360 GPU, which
-  translates the shaders itself.
+- **`cod2_shaders.nfsp` goes next to the NRO**, in the root of the tree (`sdmc:/switch/cod2-nx/cod2_shaders.nfsp`):
+  `cod2_nativo_sistema.cpp` loads it with `GetExecutableFolder()`, and `cod2_nativo_shaders.cpp` is what identifies
+  the shader of each draw with it. Without it the native renderer runs and records nothing. It is built from the
+  game's own data, so it is not distributed with the port — step 7 above builds it, and `tools/preparar_sd.ps1`
+  copies it when it is there (`-Biblioteca` overrides the path; `-Comprobar` reports it like the rest).
 
 `cod2.toml` has the settings read at startup ([cvars](glossary.md#cvar)). The one the installer page gives players is
 `release/cod2.toml` in the [installer's repository](https://github.com/fenndooscar/cod2-nx-installer).

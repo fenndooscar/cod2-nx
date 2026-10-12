@@ -6,6 +6,10 @@
 # and the game's ISO is about 7 GB. The copy is also 5 GB, which is where a hand copy gets interrupted and leaves a
 # half-tree that fails on the console with no explanation.
 #
+# It also copies cod2_shaders.nfsp, which the native renderer reads from the folder the NRO lives in
+# (app/src/cod2_nativo_sistema.cpp:760). It is built from the game data and is not in the repository, so it is a build
+# output like the NRO. Without it the port still runs; the renderer says so and identifies no shader.
+#
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File tools\preparar_sd.ps1 -Destino E:\
 #   powershell -ExecutionPolicy Bypass -File tools\preparar_sd.ps1 -Destino C:\tmp\sd -Comprobar
@@ -16,6 +20,7 @@ param(
     [Parameter(Mandatory = $true)][string]$Destino,
     [string]$Nro = '',
     [string]$Juegos = '',
+    [string]$Biblioteca = '',
     [switch]$Comprobar
 )
 $ErrorActionPreference = 'Stop'
@@ -23,10 +28,17 @@ $ErrorActionPreference = 'Stop'
 $raiz = Split-Path -Parent $PSScriptRoot
 if (-not $Nro) { $Nro = Join-Path $raiz 'app\out\sw8\cod2.nro' }
 if (-not $Juegos) { $Juegos = Join-Path $raiz 'assets\game_root' }
+if (-not $Biblioteca) { $Biblioteca = Join-Path $raiz 'app\out\sw8\cod2_shaders.nfsp' }
 $toml = Join-Path $raiz 'app\cod2.toml'
 
 foreach ($f in @($Nro, $Juegos, $toml)) {
     if (-not (Test-Path $f)) { throw "no existe: $f" }
+}
+# Not fatal: without the library the port still runs, it just cannot identify a shader.
+$hayBiblioteca = Test-Path $Biblioteca
+if (-not $hayBiblioteca) {
+    Write-Output "aviso: no hay biblioteca de shaders en $Biblioteca. Se copia todo lo demas."
+    Write-Output "       Se construye con: powershell -ExecutionPolicy Bypass -File shaders\cod2_regenerar_biblioteca.ps1"
 }
 
 $destino = (Resolve-Path -LiteralPath (New-Item -ItemType Directory -Force -Path $Destino)).Path
@@ -49,6 +61,13 @@ if ($Comprobar) {
         $a = (Get-Item $nroDestino).Length; $b = (Get-Item $Nro).Length
         Write-Output ("cod2-nx.nro  {0} bytes  {1}" -f $a, $(if ($a -eq $b) { 'ok' } else { "DISTINTO de los $b del original" }))
     } else { Write-Output 'cod2-nx.nro  FALTA' }
+    if ($hayBiblioteca) {
+        $bibDestino = Join-Path $carpeta 'cod2_shaders.nfsp'
+        if (Test-Path $bibDestino) {
+            $a = (Get-Item $bibDestino).Length; $b = (Get-Item $Biblioteca).Length
+            Write-Output ("cod2_shaders.nfsp  {0} bytes  {1}" -f $a, $(if ($a -eq $b) { 'ok' } else { "DISTINTO de los $b del original" }))
+        } else { Write-Output 'cod2_shaders.nfsp  FALTA' }
+    }
     foreach ($n in @('cod2.toml', 'game_root')) {
         if (Test-Path (Join-Path $carpeta $n)) { Write-Output "$n  ok" } else { Write-Output "$n  FALTA" }
     }
@@ -64,6 +83,11 @@ Write-Output "NRO      -> $carpeta\cod2-nx.nro  ($nroMb MB)"
 New-Item -ItemType Directory -Force -Path $carpeta | Out-Null
 Copy-Item -Force $Nro (Join-Path $carpeta 'cod2-nx.nro')
 Copy-Item -Force $toml (Join-Path $carpeta 'cod2.toml')
+if ($hayBiblioteca) {
+    $bibMb = [math]::Round((Get-Item $Biblioteca).Length / 1MB, 1)
+    Write-Output "shaders  -> $carpeta\cod2_shaders.nfsp  ($bibMb MB)"
+    Copy-Item -Force $Biblioteca (Join-Path $carpeta 'cod2_shaders.nfsp')
+}
 
 Write-Output "juego    -> $carpeta\game_root  ($juegosMb MB, 20.000 ficheros; tarda unos minutos)"
 # robocopy and not Copy-Item: 20,000 files, and a copy that is interrupted can be resumed by running this again.

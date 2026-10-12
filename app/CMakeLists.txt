@@ -38,6 +38,52 @@ set(COD2_SOURCES
     # sub_8249F980 and sub_8249DA50, plus a one-off dump of the 17,408-byte context sub_82496B20 returns. This is how
     # the offsets the hook needs are found rather than guessed; see the file's header. Both cvars are off by default.
     src/cod2_video_bink_gancho.cpp
+
+    # ----------------------------------------------------------------------------------------------------------
+    # The native renderer: the port draws the game with Vulkan instead of imitating the Xbox 360's GPU.
+    #
+    # This is the same design as the port of Need for Speed: Most Wanted (docs/native-renderer.md), and these
+    # files are that port's, moved out of src/aparcado/. They are the parts that turned out to be about the
+    # *hardware* and not about the game: the PM4 ring, the Xenos register file, the EDRAM, the Vulkan device,
+    # the texture pool. Between them they contain four references to a guest address, and three of those are
+    # in comments.
+    #
+    # What is NOT here is the other game's glue: the hooks on its Direct3D device, its shader constructors, its
+    # hot renderer functions, its shadow and LOD reductions. Those are game-specific by nature and are being
+    # written again for Call of Duty 2 in src/cod2_nativo_ganchos.cpp and its neighbours. Until they exist the
+    # renderer runs and records nothing, which is what the first milestone (the game boots without the
+    # emulation and the screen shows a test colour) needs.
+    #
+    # The cvar is cod2_renderizador: "xenos" (default) loads the SDK's emulation, "nativo" takes the app's own
+    # graphics system. See src/cod2_app.h.
+    # ----------------------------------------------------------------------------------------------------------
+    # C1: the app's own IGraphicsSystem. Presentation, the reserved MMIO range, the vblank thread and the
+    # command ring sink: it answers what the game expects from the GPU and hands the draws on.
+    src/cod2_nativo_sistema.cpp
+    # C2: the copies (resolve and clear) and presenting the resolved texture of each Swap.
+    src/cod2_nativo_destinos.cpp
+    # C3-C6: the draws themselves - pipelines, vertex and index buffers, textures, state.
+    src/cod2_nativo_dibujos.cpp
+    # Which shader each draw in the ring is, and the texture pool the draws bind.
+    src/cod2_nativo_shaders.cpp
+    src/cod2_nativo_texturas_pool.cpp
+    # The packed shader library the two above read (shaders/cod2_empaquetar.cpp writes it).
+    src/cod2_shader_library.cpp
+    # What the ring does not say about each draw, taken on the game thread: which shader each Direct3D draw
+    # used, and the register-mirror snapshot the marker path compares against. The hooks themselves are not
+    # there yet - the file's tail says exactly what they have to be and why.
+    src/cod2_nativo_ganchos.cpp
+    # The graphics settings the menu offers (F4) that the native renderer honours: post-processing,
+    # antialiasing, sky glow and the colour filter, plus the internal resolution and the frame limit, which
+    # are passed to the video mode before the game asks for it.
+    src/cod2_ajustes_graficos.cpp
+    # The ring-progress handshake the renderer drives and the guest's D3D polls used to be replaced by. The
+    # two hooks that consume it are not derived for this game yet; the file says which and why.
+    src/cod2_espera_anillo.cpp
+    # The seams: the pieces the renderer calls that are still the other game's. Each is a placeholder with
+    # the parked file it is waiting for named in its comment. Delete them one at a time as the real ones
+    # arrive; the linker says when the file is empty.
+    src/cod2_nativo_pendientes.cpp
 )
 
 if(WIN32)
@@ -95,6 +141,13 @@ endif()
 # Precompiled SPIR-V of the SDK presenter: the runtime uses it to draw the game image into the presenter
 # output.
 target_include_directories(cod2 PRIVATE "${REXSDK_DIR}/src/ui/shaders")
+
+# xxHash, vendored in the SDK: the fingerprint of a texture and the key of the shader library. The
+# native renderer's loader (src/cod2_shader_library.cpp) includes <xxhash.h> with XXH_INLINE_ALL, so it
+# needs the header and not the library.
+find_path(COD2_XXHASH_INCLUDE xxhash.h HINTS "${REXSDK_DIR}/thirdparty/xxHash"
+    NO_CMAKE_FIND_ROOT_PATH REQUIRED)
+target_include_directories(cod2 PRIVATE "${COD2_XXHASH_INCLUDE}")
 
 # Nintendo Switch: cod2.nro next to the ELF. On the SD card it goes in sdmc:/switch/cod2-nx/
 # with the game_root/ folder extracted beside it (src/cod2_app.h looks for it there).

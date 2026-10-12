@@ -1,12 +1,14 @@
 // cod2 - the app itself: where the game data is, which settings are mandatory, and the hang watchdog.
 //
-// This is the *skeleton* app: it starts the recompiled game with ReXGlue's own emulated GPU and does
-// nothing else. It has no hooks, no native renderer, no audio rescue and no cutscene path, because none of
-// those exist for Call of Duty 2 yet. The inherited ones were parked in src/aparcado/ (see its README).
+// It starts the recompiled game with ReXGlue's own emulated GPU by default. With cod2_renderizador set to
+// "nativo" it starts the port's own graphics system instead (src/cod2_nativo_sistema.cpp), and the
+// emulation plugin is never loaded: OnPreSetup fills config.graphics, and ReXApp::SetupPresentation only
+// looks at gpu_plugin when that is empty (sdk/src/ui/rex_app.cpp:342). See docs/native-renderer.md.
 //
-// The order of the work is in README.md, "Not done": first the game has to run on a PC with the emulated
-// GPU, because every translation problem is far easier to find there. Only then does it make sense to
-// replace any of it with native code.
+// The renderer it starts is complete as a Vulkan backend and incomplete as a Call of Duty 2 renderer: the
+// hooks that tell it which shader each of this game's draws uses are not derived yet, so it answers the
+// game's GPU-side expectations and records no draws. That is the state the first milestone needs; the work
+// left is listed at the tail of src/cod2_nativo_ganchos.cpp.
 
 #pragma once
 
@@ -26,6 +28,7 @@
 #include <thread>
 #include <vector>
 
+#include "cod2_nativo_sistema.h"
 #include "cod2_perfil_pc.h"
 #include "cod2_pc_simbolos.h"
 #include "cod2_rendimiento.h"
@@ -37,6 +40,23 @@ class Cod2App : public rex::ReXApp {
   static std::unique_ptr<rex::ui::WindowedApp> Create(
       rex::ui::WindowedAppContext& ctx) {
     return std::unique_ptr<Cod2App>(new Cod2App(ctx, "cod2", PPCImageConfig));
+  }
+
+  // ==========================================================================
+  //  0. THE NATIVE RENDERER
+  //
+  //  With cod2_renderizador = "nativo" the graphics system is the port's own
+  //  (src/cod2_nativo_sistema.cpp) and the Xenos emulation plugin is not
+  //  loaded, because ReXApp::SetupPresentation only reaches for gpu_plugin
+  //  when config.graphics is empty (sdk/src/ui/rex_app.cpp:342). The code
+  //  default is still the emulation: this switch is what makes the comparison
+  //  possible, and it is the escape hatch if the native path misbehaves on the
+  //  console.
+  // ==========================================================================
+  void OnPreSetup(rex::RuntimeConfig& config) override {
+    if (cod2::nativo::Activo()) {
+      config.graphics = cod2::nativo::CrearSistemaGrafico();
+    }
   }
 
  protected:

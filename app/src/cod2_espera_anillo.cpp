@@ -260,53 +260,23 @@ void InformeEsperasCompletas() {
 
 }  // namespace
 
-REX_EXTERN(__imp__sub_825A5D18);
-REX_HOOK_RAW(sub_825A5D18) {
-  static const bool activo = cod2::nativo::Activo() && REXCVAR_GET(cod2_espera_anillo_bloqueante);
-  if (activo) {
-    const uint32_t estructura = ctx.r3.u32;
-    const uint32_t dispositivo = estructura ? Leer32(base, estructura) : 0;
-    if (dispositivo && !(Leer8(base, dispositivo + kOffEstado) & 0x04)) {
-      const uint32_t palabra = Leer32(base, dispositivo + kOffLecturaDevuelta);
-      if (palabra) {
-        const uint64_t vueltas = g_vueltas.fetch_add(1, std::memory_order_relaxed) + 1;
-        const uint32_t visto = cod2::nativo::ProgresoAnillo();
-        if (Leer32(base, palabra) == Leer32(base, estructura + 8)) {
-          const auto antes = std::chrono::steady_clock::now();
-          g_esperas.fetch_add(1, std::memory_order_relaxed);
-          if (cod2::nativo::EsperarProgresoAnillo(
-                  visto, std::chrono::microseconds(REXCVAR_GET(cod2_espera_anillo_max_us)))) {
-            g_avances.fetch_add(1, std::memory_order_relaxed);
-          }
-          const uint64_t ns_espera = uint64_t(
-              std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - antes)
-                  .count());
-          g_ns_esperando.fetch_add(ns_espera, std::memory_order_relaxed);
-          cod2::esperas::Sumar(cod2::esperas::kSitioAnillo, ns_espera);
-          {
-            uint64_t previo = g_ns_maxima.load(std::memory_order_relaxed);
-            while (ns_espera > previo &&
-                   !g_ns_maxima.compare_exchange_weak(previo, ns_espera, std::memory_order_relaxed)) {
-            }
-          }
-          Informe();
-        } else if ((vueltas & 0xFFFF) == 0) {
-          Informe();
-        }
-      }
-    }
-  }
-  __imp__sub_825A5D18(ctx, base);
-}
-
-// The complete D3D wait for the ring to reach a point, with who asks for it.
-// See the comment of AnotarEsperaCompleta. Always measured: two clock reads per wait.
-REX_EXTERN(__imp__sub_82597690);
-REX_HOOK_RAW(sub_82597690) {
-  const uint32_t lr = uint32_t(ctx.lr);
-  const auto antes = std::chrono::steady_clock::now();
-  __imp__sub_82597690(ctx, base);
-  const uint64_t ns = uint64_t(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - antes).count());
-  AnotarEsperaCompleta(lr, ns);
-}
+/*
+ * THE TWO HOOKS THAT CONSUME THE WAIT ARE NOT HERE YET.
+ *
+ * What stood here hooked the previous port's addresses: its D3D ring wait (sub_82597690), which spins
+ * until the GPU reports it has read the ring up to the write pointer, and the inner poll that wait loops
+ * on (sub_825A5D18). Neither address exists in Call of Duty 2, so keeping them would have been a link
+ * error at best and, with the addresses declared in overrides.toml, a strong symbol for a function this
+ * game never calls at worst.
+ *
+ * What has to go here is what the previous port did, and the reason is not about the game: the guest's
+ * D3D waits for the ring by polling, and a poll that never sleeps burns a core the ring thread needs. The
+ * port replaces the poll with a bounded wait on the progress handshake above, which is complete and is
+ * already being driven by the renderer (cod2_nativo_sistema.cpp calls AvisarProgresoAnillo whenever it
+ * returns the read pointer or delivers an interrupt). Re-deriving the two addresses from CoD2's own
+ * default.xex is what turns the handshake into an actual saving.
+ *
+ * Until then it is harmless: AvisarProgresoAnillo bumps a counter and takes a lock only when somebody is
+ * already waiting, and nobody can be waiting, because EsperarProgresoAnillo has no callers yet. The
+ * report below still prints, with zeros.
+ */
