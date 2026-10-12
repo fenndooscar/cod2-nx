@@ -22,11 +22,24 @@
 #        powershell -ExecutionPolicy Bypass -File tools\pc\jugar.ps1 -Destino D:\cod2
 #        powershell -ExecutionPolicy Bypass -File tools\pc\jugar.ps1 -Esperar     # waits, then says how it ended
 #        powershell -ExecutionPolicy Bypass -File tools\pc\jugar.ps1 -Extra --log-level=debug
+#        powershell -ExecutionPolicy Bypass -File tools\pc\jugar.ps1 -Partida     # drives the menus into a mission
+#        powershell -ExecutionPolicy Bypass -File tools\pc\jugar.ps1 -Ventana 1280x720
+#
+# The window is never fullscreen: see the --fullscreen=false note below.
+#
+# -Partida. The three-dimensional scene is only on screen inside a mission, and getting there by hand means
+# sitting through 150 seconds of intro movies and then pressing the right buttons. This does it: waits for the
+# intro, then Start, then A twice (main menu -> Single Player -> the first mission). It needs --mnk_mode=true,
+# which is added for you: this game reads the Xbox 360 controller, not the keyboard, so without the
+# keyboard-to-controller emulation nothing the script sends is seen at all - the game looks frozen on the menu.
+# The keys are the SDK's own bindings (keybind_start = "X,Return", keybind_a = "Semicolon,Space").
 param(
   [string]$Destino = (Join-Path $env:LOCALAPPDATA 'cod2-nx\pc'),
   [string]$GameDataRoot = '',
   [switch]$SinCopiar,
   [switch]$Esperar,
+  [switch]$Partida,
+  [string]$Ventana = '',
   [string[]]$Extra = @()
 )
 
@@ -61,6 +74,11 @@ Write-Output "runtime en $Destino ($copiados fichero(s) copiado(s))"
 # The saves go next to the runtime, outside the repository, so they are readable and writable and
 # easy to find. --store_shaders=false keeps the shader cache from growing a second copy of the data.
 #
+# --fullscreen=false. The SDK's window starts fullscreen (cvar `fullscreen`, UI/Window), which takes over the
+# desktop: the game covers everything, the mouse is captured and nothing else can be looked at while a 4-minute
+# test runs. In a window it is just another window - the desktop stays usable and the window can be photographed
+# or left alone. The guest video mode is unchanged (1280x720); -Ventana only resizes the frame around it.
+#
 # An extra argument is quoted when it contains a space. Start-Process joins the list with spaces and
 # adds no quoting of its own, so '--cl=+set ui_nextMission 2' would arrive at the runtime as two
 # arguments and the cvar would be left with '+set'. The guest command line (--cl) is exactly the kind
@@ -68,12 +86,35 @@ Write-Output "runtime en $Destino ($copiados fichero(s) copiado(s))"
 $args = @(
   "--game_data_root=$GameDataRoot",
   "--user_data_root=$(Join-Path $Destino 'datos')",
-  '--store_shaders=false'
-) + ($Extra | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } })
+  '--store_shaders=false',
+  '--fullscreen=false'
+)
+if ($Ventana) {
+  $args += "--window_width=$($Ventana.Split('x')[0])", "--window_height=$($Ventana.Split('x')[1])"
+}
+if ($Partida) { $args += '--mnk_mode=true' }
+# `powershell -File script.ps1 -Extra a b c` binds only `a` to an array parameter and silently drops the rest:
+# a run asked for three extra cvars arrived with one, and the missing `--cod2_captura_cada_s` was only noticed
+# because no PNGs appeared. A single comma-separated value survives -File, so both spellings are accepted.
+if ($Extra.Count -eq 1 -and $Extra[0] -match ',') { $Extra = $Extra[0] -split ',' }
+$args += ($Extra | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } })
 $p = Start-Process -FilePath (Join-Path $Destino 'cod2.exe') -ArgumentList $args `
   -WorkingDirectory $Destino -PassThru
 Write-Output "cod2.exe pid $($p.Id)"
 Write-Output "registro: $(Join-Path $Destino 'logs')"
+
+if ($Partida) {
+  $pulsar = Join-Path $PSScriptRoot 'pulsar.ps1'
+  Start-Sleep -Seconds 158  # the four intro movies, back to back
+  if ($p.HasExited) { throw 'el juego termino antes de llegar al menu' }
+  & $pulsar -Teclas RETURN -Cada 2 -Veces 3 | Select-Object -Last 1
+  Start-Sleep -Seconds 8
+  & $pulsar -Teclas SPACE -Cada 2 -Veces 4 | Select-Object -Last 1
+  Start-Sleep -Seconds 10
+  & $pulsar -Teclas SPACE -Cada 2 -Veces 4 | Select-Object -Last 1
+  Start-Sleep -Seconds 8
+  Write-Output 'en la partida; el proceso sigue vivo'
+}
 
 if ($Esperar) {
   # Why this exists. A run was reported as "it crashed after the second mission" and the log simply
