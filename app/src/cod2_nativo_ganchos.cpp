@@ -990,15 +990,21 @@ EstadisticasGanchos EstadisticasDeGanchos() {
  * 1. SHADER CREATION - done, below. CoD2 has ONE constructor where the fork had two, and it does not need
  *    to be told the stage: the container says it. See the comment on the hook.
  *
- * 2. THE DRAW ENTRIES - still missing, and it is the piece that makes the renderer draw anything.
+ * 2. THE DRAW ENTRIES - still missing, and it is the piece that makes the renderer's identity reliable.
  *    The fork hooked its four Direct3D Draw* entry points and left a record per draw - which vertex and
  *    pixel shader were bound, the primitive type and the four arguments - in a queue the ring drains with
- *    SacarDibujo. CoD2's Direct3D front end is shaped differently (docs/inventario-renderer-nativo.md §1):
- *    the per-draw entry is sub_82368C40, called once per entry by the list walker sub_82368F20, and the
- *    draw itself is sub_82368310, which has exactly one call site in the whole program. Those are the two
- *    candidates and they are not the same shape as the fork's, so which one carries the primitive type and
- *    the vertex count has to be read off the code before anything is written - a record with the wrong
- *    arguments is worse than no record, because the ring trusts it.
+ *    SacarDibujo. Without it the ring is not blind: it identifies the pixel shader from the IM_LOAD packet
+ *    itself (the microcode is looked up in the library, ps_actual_) and draws with it
+ *    (UsarIdentidadDelAnillo, cod2_nativo_sistema.cpp:3355, and DibujarNativo is called from :2162). What
+ *    the record adds is the vertex shader: by the time a patched VS reaches the ring its microcode is not
+ *    the container's, so the ring has to remember which object that patched microcode came from
+ *    (vs_por_microcodigo_) and, without a record, can only reuse a pairing it has already seen.
+ *    CoD2's Direct3D front end is shaped differently (docs/inventario-renderer-nativo.md §1): the per-draw
+ *    entry is sub_82368C40, called once per entry by the list walker sub_82368F20, and the draw itself is
+ *    sub_82368310, which has exactly one call site in the whole program. Those are the candidates and they
+ *    are not the same shape as the fork's, so which one carries the primitive type and the vertex count has
+ *    to be read off the code before anything is written - a record with the wrong arguments is worse than
+ *    no record, because the ring trusts it: it checks type, count and shaders and draws what it is told.
  *
  * 3. THE REGISTER MARKER - the optimisation, not a requirement. The fork replaced its FlushState's ~7
  *    register packets with one compound marker the ring understands (cod2_d3d_marcador_registro). Without
@@ -1006,9 +1012,10 @@ EstadisticasGanchos EstadisticasDeGanchos() {
  *    been identified; docs/inventario-renderer-nativo.md §3.1 marks the changed-register-mask emitter as a
  *    guess and says why, and that is the function this would hang off.
  *
- * Until (2) exists the renderer runs, answers the game's GPU-side expectations and records no draws, which
- * is what the first milestone needs. The mechanism - the record queue, the record lifecycle, the
- * register-mirror snapshot, the counters - is complete and starts being exercised the moment it arrives.
+ * Until (2) exists the renderer runs, answers the game's GPU-side expectations and draws through the ring
+ * identity, which is what the first milestone needs. The mechanism - the record queue, the record
+ * lifecycle, the register-mirror snapshot, the counters - is complete and starts being exercised the
+ * moment it arrives.
  */
 
 /*

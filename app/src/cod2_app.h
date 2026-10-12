@@ -5,10 +5,12 @@
 // emulation plugin is never loaded: OnPreSetup fills config.graphics, and ReXApp::SetupPresentation only
 // looks at gpu_plugin when that is empty (sdk/src/ui/rex_app.cpp:342). See docs/native-renderer.md.
 //
-// The renderer it starts is complete as a Vulkan backend and incomplete as a Call of Duty 2 renderer: the
-// hooks that tell it which shader each of this game's draws uses are not derived yet, so it answers the
-// game's GPU-side expectations and records no draws. That is the state the first milestone needs; the work
-// left is listed at the tail of src/cod2_nativo_ganchos.cpp.
+// The renderer it starts is complete as a Vulkan backend and complete enough as a Call of Duty 2 renderer
+// to draw: it answers the game's GPU-side expectations (the MMIO registers, the ring read pointer, vblank,
+// GPU writes to memory, occlusion queries) and identifies each draw's shaders from the ring's own IM_LOAD
+// packets. The shader constructor is hooked, so the vertex shader is identified too. What is still missing
+// is the game's draw entry, which is what makes that identity exact instead of remembered, and it is listed
+// with what it has to provide at the tail of src/cod2_nativo_ganchos.cpp.
 
 #pragma once
 

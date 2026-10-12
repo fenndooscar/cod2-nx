@@ -214,7 +214,9 @@ Not done, in the order they have to happen:
    now built (see item 13). What is left of this item is the game-specific half: the hooks that tell the renderer
    which shader each draw uses, and the audio server. Both need their addresses re-derived from CoD2's own
    `default.xex`; [docs/inventario-renderer-nativo.md](docs/inventario-renderer-nativo.md) has the ones for the
-   renderer, and `app/src/cod2_nativo_pendientes.cpp` lists what is still a placeholder.
+   renderer, and `app/src/cod2_nativo_pendientes.cpp` lists what is still a placeholder. What the renderer still
+   cannot do without the draw entry is identify a *patched* vertex shader exactly: it reuses a pairing it has already
+   seen instead (`UsarIdentidadDelAnillo`).
 7. **Run the NRO on the console.** It builds and links, and has never been executed on real hardware: that needs a
    Switch with homebrew enabled. The SD card layout it expects is `sdmc:/switch/cod2-nx/` (see
    [docs/building.md](docs/building.md)).
@@ -427,11 +429,14 @@ declaring functions inside functions, and one hand-added entry in `app/huecos.to
 
        So the core is now compiled, and `cod2_renderizador = "nativo"` starts it instead of the Xenos emulation
        (`app/src/cod2_app.h`'s `OnPreSetup` fills `config.graphics`, which is the SDK's own substitution point —
-       `ReXApp::SetupPresentation` only loads the plugin when it is empty, `sdk/src/ui/rex_app.cpp:342`). What is left
-       is the part the audit was actually about: re-deriving the hooks that tell the renderer which shader each draw
-       uses. [docs/inventario-renderer-nativo.md](docs/inventario-renderer-nativo.md) has the addresses for those,
-       found in this game's own generated code. Nothing here is a reason to conclude that 30 fps at 720p is out of
-       reach; what it is, is a reason the hooks had to be found again before any of it could draw.
+       `ReXApp::SetupPresentation` only loads the plugin when it is empty, `sdk/src/ui/rex_app.cpp:342`). It is not
+       blind either: it identifies each draw's shaders from the ring's own `IM_LOAD` packets
+       (`cod2_nativo_sistema.cpp:3355`, `UsarIdentidadDelAnillo`) and draws with them. What is left is the part the
+       audit was actually about — the game's draw entry, which makes that identity exact instead of remembered, and
+       the shader constructor, which is already hooked (`sub_8209BD78`).
+       [docs/inventario-renderer-nativo.md](docs/inventario-renderer-nativo.md) has the addresses for the rest, found
+       in this game's own generated code. Nothing here is a reason to conclude that 30 fps at 720p is out of reach;
+       what it is, is a reason the hooks had to be found again before any of it could be exact.
 
        **The GPU is where the frame is, and the port's own resolve machinery is the largest single piece of it.**
        `libnx por segundo` reports how much of every second is spent blocked inside `nvFenceWait` with a non-zero
