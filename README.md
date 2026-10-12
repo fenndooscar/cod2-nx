@@ -330,8 +330,8 @@ declaring functions inside functions, and one hand-added entry in `app/huecos.to
        dibujados` 9.0, `sin transferencias` 6.8, `sin resolves` **9.6**, `sin cargas de texturas` 6.4, `sin efecto
        de presentacion` 5.9 — the rotation stopped after five of the eight modes, so `sin nada` was never measured.
        Removing *all* of the resolve dispatches is the best single cut and it is **2.2×**, not 7×, and the CPU total
-       stays at 258 % of 400 % in every mode: the GPU work is about half the frame and the rest is not GPU work at
-       all. The render area did what it was supposed to (`area 668.60 MB ÷ 93.5 passes = 7.15 MB`, i.e. 3.57 MB per
+       stays at 258 % of 400 % in every mode, which is a total that counts blocked time too, so it is not the split
+       to read (the GPU wait below is). The render area did what it was supposed to (`area 668.60 MB ÷ 93.5 passes = 7.15 MB`, i.e. 3.57 MB per
        store and 3.57 MB per load, which is the guest's 1280×698 and not the 10 MB EDRAM allocation), so the
        remaining lever on that axis is the pass count alone. It is 93.5, of which `pases por motivo` says `destino
        9.1 | barrera 83.9 | barrera vacia 0.0 | otra 0.5`, and `pases por clase` says `dibujados 76.1 (556.05 MB) |
@@ -382,26 +382,36 @@ declaring functions inside functions, and one hand-added entry in `app/huecos.to
        whole reason it cannot be brought back is not caution but arithmetic: of the **199 distinct `sub_XXXXXXXX`
        addresses it hooks, 2 exist in Call of Duty 2's 20,944 generated functions** (`sub_821CF770`,
        `sub_8245DD60`, both in files that are about audio and shadows, not rendering). It is the other game's
-       renderer, function by function. What the measurements do say is where a CoD2 one would have to go, and it
-       is not where the parked code points. The GPU frame is 138 ms (the fence wait of 595.8 ms per second divided
-       by 4.3 frames, and the CPU is idle for it: the frame is 232 ms and 94 ms of that is the port's own CPU
-       work). Of the 138 ms, removing every resolve takes 70 ms off (595.8 → 649.9 ms/s at 9.6 fps = 138 → 67.7 ms)
-       and removing every draw takes 57 ms off, which adds up: **the GPU frame is the port's resolve machinery plus
-       the guest's rasterization, and nothing else.**
-       The floor is the rasterization. `tijera` is 131.5 screens per frame, so the 175 draws ask for at most
-       131.5 × 1280 × 720 = 121 M pixels; GM20B in portable mode is 460.8 MHz with 8 ROPs, so 3.69 Gpixel/s, so
-       **33 ms of pure fill before a single pixel of the port's own work**, and 33 ms is exactly the frame budget
-       of 30 fps. The measured GPU frame is 138 ms, so the GPU is running at a quarter of its fill rate and the
-       other 105 ms is attachment round trips and the resolve dispatches — 93.5 passes × 14.3 MB of store and load
-       is 1.34 GB of colour alone, and depth makes it more. **30 fps at 720p is therefore out of reach on this
-       hardware, whatever the renderer**: even a port that resolved nothing and passed nothing would be at ~33 ms
-       of fill plus the CPU's 94 ms, and the CPU half does not shrink because the GPU got faster. What is reachable
-       is roughly 15 fps at 720p, or 30 fps at 480–540p — and the port has no downscale path at all
-       (`draw_resolution_scale` is only ever ≥ 1), so that is new work, not a setting. The one piece of the parked
-       renderer that *would* pay is the direct resolve the SDK itself left parked: `TryResolveCopyDirectly` is a
-       preflight that ends in `DumpRenderTargets`, `GetDirectResolvePipeline` hands back the EDRAM-reading copy
-       shader, and the fused "host image → shared memory in one dispatch" shader was never written. That is worth
-       the ~42 ms of dump compute and one of the two round trips per resolve, about 1.3×, not 7×;
+       renderer, function by function, and bringing it back means re-deriving those 199 functions from CoD2's own
+       `default.xex` before a line of it can run. What the measurements do say is where a CoD2 one would have to
+       go, and it is not where the parked code points.
+
+       **The GPU is where the frame is, and the port's own resolve machinery is the largest single piece of it.**
+       `libnx por segundo` reports how much of every second is spent blocked inside `nvFenceWait` with a non-zero
+       timeout — waiting for the GPU, timed directly, as opposed to the zero-timeout query that shares its name —
+       and in the round-22 in-game report that is 595.8 ms of every second: **59.6 % of the wall time**, or 138.6 ms
+       of a 232.6 ms frame. The A/B then says which part of the GPU work it is, per frame: `sin dibujados` (the 175
+       draws) takes the GPU wait to 81.0 ms and the frame to 111 ms, `sin resolves` takes it to 67.7 ms and the frame
+       to 104 ms, `sin transferencias` to 111.4 ms, `sin cargas de texturas` to 120.3 ms, `sin efecto de
+       presentacion` to 133.7 ms. So the guest's draws are about 58 ms of GPU per frame and the port's 33.7 resolves
+       about 71 ms, and **the resolve machinery — the one item here that is not the game's own work — is the largest
+       single thing in the frame**. The remainder of the frame is not a fixed CPU cost either: the part that is not
+       the measured GPU wait is 94 ms in `normal` and only 30-36 ms in *every* skip mode, so it is other GPU-related
+       blocking plus CPU work, not a floor that stays put when the GPU gets faster.
+
+       **That makes `sin nada` — every category of GPU work removed at once — the one number that decides whether
+       30 fps is reachable at all, and it has never been measured.** 30 fps is 33.3 ms per frame, a 7× cut, and the
+       largest single lever measured is 2.2×. If `sin nada` lands near 35 ms, the GPU work is the whole story and
+       cutting it several times over is the way there; if it lands near 90 ms, then something outside the GPU work
+       is the floor — the guest's own threads, one of which spends 90.6 % of its samples in a guest spin on a guest
+       lock word — and 30 fps at 720p is out of reach on this hardware whatever the renderer is. The A/B rotation in
+       `sdk/src/ui/switch_perf.cpp` was reordered to put `sin nada` **second** and to make each report five seconds,
+       so that answer arrives ten seconds into a session instead of never; until it exists, any claim about where
+       the frame's time really goes is a guess, this paragraph included. The one piece of the parked renderer that
+       *would* pay is the direct resolve the SDK itself left parked: `TryResolveCopyDirectly` is a preflight that
+       ends in `DumpRenderTargets`, `GetDirectResolvePipeline` hands back the EDRAM-reading copy shader, and the
+       fused "host image → shared memory in one dispatch" shader was never written. It attacks the 71 ms item
+       above and is worth the dump compute and one of the two round trips per resolve;
     6. the guest busy-waits, once the GPU work fits;
     7. function ordering (done): `app/orden_funciones.ld` held 555 of the other game's addresses and matched nothing.
        It now holds Call of Duty 2's, regenerated with `tools/calientes.py` from `switch-logs/logs-old-1` — the

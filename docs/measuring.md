@@ -187,6 +187,17 @@ chosen:
    rectangle without clipping, so it is an upper bound of an upper bound. That needs `vkCmdWriteTimestamp` at the
    pass boundaries, read back a frame later, with the scale of the section above — the parked native renderer
    (`app/src/aparcado/cod2_nativo_destinos.cpp`) has a working implementation to copy the plumbing from.
+7. **The GPU half of the frame, timed directly, and the trap in reading it.** The `libnx por segundo` line separates
+   `fences consultadas` from `fences esperadas`, and that is not a style choice: `nvFenceWait(fence, 0)` and
+   `nvFenceWait(fence, timeout)` behave differently (`sdk/src/ui/switch_perf.cpp`, the `nvFenceWait` wrapper), and
+   only the second blocks. So `esperadas ms ÷ fps` is the milliseconds per frame spent *blocked waiting for the
+   GPU* — a direct measurement, and in the round-22 report it is `595.8 ÷ 4.3 = 138.6 ms` of a 232.6 ms frame, 59.6 %
+   of the wall time. **The trap:** it is tempting to subtract it and call the rest the CPU half. Do not. The
+   subtraction is circular — both terms come from the same `fps` — and it is wrong on the evidence: the remainder is
+   94 ms in `normal` but only 30-36 ms in every skip mode, so it is not a fixed cost that survives the GPU getting
+   faster, it is other GPU-related blocking plus CPU work. The `CPU total %` on the report's first line is not the
+   CPU half either, because a thread blocked inside `nvFenceWait` still counts as running. The only way to find the
+   floor under all the GPU work is to remove all of it at once (`sin nada`).
 
 ## Verifying a change
 
