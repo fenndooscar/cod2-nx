@@ -52,7 +52,7 @@ than WMV3, and the shaders live **inside compressed fastfiles** rather than in f
 | `mesa/` — the NVK driver patch and its build script | Reusable as is |
 | `shaders/` — XenosRecomp, the 2005 shader container reader, the packer, the WebAssembly tools | Reusable; the container format matches |
 | `tools/` — third-party fetch, direct calls, gap finder, literal copies, build scripts | Reusable; game-specific addresses come from configuration |
-| `app/` — the CMake project and the renderer skeleton | **Not usable yet**: its hooks, native replacements and addresses belong to the other game |
+| `app/` — the CMake project and the renderer skeleton | The project builds and the NRO links. The native renderer's **core** is compiled and reachable with `cod2_renderizador = "nativo"`; its **hooks** are still the other game's and are parked |
 
 ## State of this fork
 
@@ -209,16 +209,25 @@ Not done, in the order they have to happen:
      `Game session no longer available` in one run and stayed empty for the first 25 s of another, so it is written
      late, not at startup. Nothing of it reaches the port's log.
    Next: identify what the *level* is drawing — the menu and the movies are accounted for, the in-level scene is not.
-6. **Replace the app's game-specific code** (`app/src/cod2_*.cpp`): the hooks, the D3D trace, the native renderer,
-   the audio server — all of it is still the other game's, and it is parked in `app/src/aparcado/` rather than
-   compiled.
+6. **Replace the app's game-specific code** (`app/src/cod2_*.cpp`). The previous game's code is parked in
+   `app/src/aparcado/` rather than compiled — except the native renderer's core, which is about the hardware and is
+   now built (see item 13). What is left of this item is the game-specific half: the hooks that tell the renderer
+   which shader each draw uses, and the audio server. Both need their addresses re-derived from CoD2's own
+   `default.xex`; [docs/inventario-renderer-nativo.md](docs/inventario-renderer-nativo.md) has the ones for the
+   renderer, and `app/src/cod2_nativo_pendientes.cpp` lists what is still a placeholder.
 7. **Run the NRO on the console.** It builds and links, and has never been executed on real hardware: that needs a
    Switch with homebrew enabled. The SD card layout it expects is `sdmc:/switch/cod2-nx/` (see
    [docs/building.md](docs/building.md)).
 8. **Add a Bink path** over FFmpeg for the cutscenes, and the matching FFmpeg decoders
    (`sdk/thirdparty/FFmpeg/config_cod2_wmv3.h` is still a WMV3 configuration). The game already plays its movies
    through its own Bink player, so this is for replacing that path, not for unblocking the menu.
-9. **Unpack the `.ff` fastfiles** before scanning for shader containers, then build `cod2_shaders.nfsp`.
+9. ~~Unpack the `.ff` fastfiles before scanning for shader containers, then build `cod2_shaders.nfsp`.~~ Done:
+   `tools/extraer_shaders.py` inflates each fastfile and the existing container scan does the rest, and
+   `shaders/cod2_regenerar_biblioteca.ps1` runs the whole pipeline. Measured over the retail data: **111 fastfiles,
+   0 unreadable, 7,508 container occurrences, 1,124 distinct** (653 pixel / 471 vertex), all of them translating,
+   compiling and passing `spirv-val`, and the library is byte-identical across three runs. See
+   [docs/shaders.md](docs/shaders.md). What is *not* done is the part that matters: nothing has yet confirmed that a
+   live draw asks for a container that is in the library.
 10. **Record a PGO profile** on the console.
 
 ~~11. Write the missing `XamUserWriteProfileSettings` setting types.~~ Not a real gap: the
@@ -406,17 +415,23 @@ declaring functions inside functions, and one hand-added entry in `app/huecos.to
        `DumpRenderTargets` the flag-off path calls, is now off in `app/src/cod2_rendimiento.cpp`: it made every one
        of the frame's 33.7 resolves do its rectangle and pipeline work twice;
 
-       **The parked native renderer cannot be revived, and that is an address audit, not a judgement call.**
-       `app/src/aparcado/` holds the previous port's native renderer — 2 MB of source, including a 700 KB
-       `cod2_nativo_dibujos.cpp` — and of the **199 distinct `sub_XXXXXXXX` addresses it hooks, 2 exist in Call of
-       Duty 2's 20,944 generated functions** (`sub_821CF770`, `sub_8245DD60`, both in files that are about audio and
-       shadows, not rendering). It is the other game's renderer, function by function, and bringing it back means
-       re-deriving those 199 functions from CoD2's own `default.xex` before a line of it can run. **What that
-       measures is the parked code, not the approach.** The approach is what took the other port from 1-3 fps to
-       32-35 fps, and a CoD2 renderer of that shape would be written against CoD2's own addresses, not this one's:
-       what is inherited and reusable is the method and the SDK-side plumbing (the ring reader, the Vulkan device,
-       the shader library), not the 199 hooks. Nothing here is a reason to conclude that 30 fps at 720p is out of
-       reach; it is a reason not to expect the parked files to provide it.
+       **The native renderer was parked because of its hooks, and it is no longer parked.** The address audit is
+       real and it still stands: of the **205 distinct `sub_XXXXXXXX` addresses** that appeared in `app/src/aparcado/`
+       and the two TOML tables, **203 do not exist in Call of Duty 2's 20,944 generated functions** (the two that do,
+       `sub_821CF770` and `sub_8245DD60`, are about audio and shadows, not rendering). What that measures, though, is
+       the *hooks* — the places where the previous port reached into its own game — and not the renderer. The core is
+       about the Xbox 360's hardware: the PM4 ring, the Xenos register file, the EDRAM, the Vulkan device, the texture
+       pool. That hardware is the same in both games. Measured before unparking it: **not one of the 22 files contains
+       a real guest-address reference** — no `REX_EXTERN(`, no `REX_HOOK`, no `__imp__sub_`; all 37 textual
+       `sub_XXXXXXXX` occurrences are in comments and log strings.
+
+       So the core is now compiled, and `cod2_renderizador = "nativo"` starts it instead of the Xenos emulation
+       (`app/src/cod2_app.h`'s `OnPreSetup` fills `config.graphics`, which is the SDK's own substitution point —
+       `ReXApp::SetupPresentation` only loads the plugin when it is empty, `sdk/src/ui/rex_app.cpp:342`). What is left
+       is the part the audit was actually about: re-deriving the hooks that tell the renderer which shader each draw
+       uses. [docs/inventario-renderer-nativo.md](docs/inventario-renderer-nativo.md) has the addresses for those,
+       found in this game's own generated code. Nothing here is a reason to conclude that 30 fps at 720p is out of
+       reach; what it is, is a reason the hooks had to be found again before any of it could draw.
 
        **The GPU is where the frame is, and the port's own resolve machinery is the largest single piece of it.**
        `libnx por segundo` reports how much of every second is spent blocked inside `nvFenceWait` with a non-zero

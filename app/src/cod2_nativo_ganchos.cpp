@@ -47,9 +47,21 @@ REXCVAR_DECLARE(bool, cod2_sombras_sin_vegetacion);
 namespace cod2::nativo {
 namespace {
 
-// Where SetVertexShader (sub_8259C2A8) and SetPixelShader (sub_8259BDC0) store the bound shader inside
-// the device object (from the recompiled code).
-constexpr uint32_t kDispositivoVs = 0x4FE8;
+// Where the bound shader lives inside the device object. Both offsets were re-derived from Call of Duty 2's
+// own generated code, because the inherited pair was the other game's and one of the two is wrong here:
+//
+//   0x3290 (12944)  pixel shader.  sub_82098A88 (SetPixelShader) does `stw r31,12944(r30)` at
+//                   cod2_recomp.1.cpp:371, and sub_8209BB00 (the PS container reader) reads it back at
+//                   cod2_recomp.0.cpp:451/463. Two functions, same slot: confirmed.
+//   0x4FD8 (20440)  vertex shader. sub_82098B10 (SetVertexShader) does `stw r30,20440(r31)` at
+//                   cod2_recomp.34.cpp:368 and reads it back at :356, then calls sub_8209BE90 - the
+//                   vertex-shader counterpart of sub_8209BB00 - with (device, shader) at :372.
+//
+// The inherited 0x4FE8 (20456) is NOT the vertex shader slot: the only read of it in the whole program is
+// cod2_recomp.5.cpp:1536, inside VdShutdownEngines, which uses it to find something to shut down. Reading
+// it as the bound VS would have given every draw a garbage shader object, which is the one thing the
+// renderer cannot recover from: it would look up nothing and record nothing, with no error anywhere.
+constexpr uint32_t kDispositivoVs = 0x4FD8;
 constexpr uint32_t kDispositivoPs = 0x3290;
 
 // One producer (the thread using D3D) and one consumer (the ring thread).
@@ -966,7 +978,7 @@ EstadisticasGanchos EstadisticasDeGanchos() {
 }  // namespace cod2::nativo
 
 /*
- * THE HOOKS ARE NOT HERE YET, AND THAT IS THE WORK THAT IS LEFT.
+ * THE SHADER CONSTRUCTOR, AND WHAT IS STILL MISSING AFTER IT.
  *
  * What stood here was the previous port's three hooks, on its addresses: its pixel shader constructor
  * (sub_8259BC90), its vertex shader constructor (sub_8259C038) and the function that patches a vertex
@@ -975,24 +987,68 @@ EstadisticasGanchos EstadisticasDeGanchos() {
  * link error at best and, with the addresses declared in overrides.toml, a strong symbol for a function
  * this game never calls at worst.
  *
- * What has to go here, and why, is unchanged from the previous port, because it is about Direct3D and not
- * about the game:
+ * 1. SHADER CREATION - done, below. CoD2 has ONE constructor where the fork had two, and it does not need
+ *    to be told the stage: the container says it. See the comment on the hook.
  *
- *   1. CoD2's two shader constructors, hooked the same way: r3 is the original container on entry and the
- *      created object on return, so the hook reads the container, calls the original, and records
- *      object -> container. The ring looks the microcode it reads up in that map and gets the identity
- *      back. Nothing else identifies a shader reliably: by the time a vertex shader reaches the ring,
- *      Direct3D has reordered its fetches, applied the vertex declaration's swizzles, and nulled the
- *      outputs the pixel shader does not read.
- *   2. CoD2's Draw* entry points (DrawVertices, DrawIndexedVertices, the UP variants), hooked so that each
- *      one leaves a record of the bound vertex and pixel shader in a queue. The ring pairs each draw it
- *      reads with the next record and checks the primitive type and the vertex count before trusting it,
- *      so a mismatch costs a missed draw and not a wrong one.
- *   3. CoD2's FlushState equivalent, if it has one, for the marker path (cod2_d3d_marcador_registro). The
- *      marker is an optimisation: without it the ring reads the register packets the way it always did.
+ * 2. THE DRAW ENTRIES - still missing, and it is the piece that makes the renderer draw anything.
+ *    The fork hooked its four Direct3D Draw* entry points and left a record per draw - which vertex and
+ *    pixel shader were bound, the primitive type and the four arguments - in a queue the ring drains with
+ *    SacarDibujo. CoD2's Direct3D front end is shaped differently (docs/inventario-renderer-nativo.md §1):
+ *    the per-draw entry is sub_82368C40, called once per entry by the list walker sub_82368F20, and the
+ *    draw itself is sub_82368310, which has exactly one call site in the whole program. Those are the two
+ *    candidates and they are not the same shape as the fork's, so which one carries the primitive type and
+ *    the vertex count has to be read off the code before anything is written - a record with the wrong
+ *    arguments is worse than no record, because the ring trusts it.
  *
- * Until those exist the renderer runs, answers the game's GPU-side expectations and records no draws,
- * which is what the first milestone needs. The mechanism above - the record queue, the record lifecycle,
- * the register-mirror snapshot, the counters - is complete and starts being exercised the moment the
- * hooks arrive.
+ * 3. THE REGISTER MARKER - the optimisation, not a requirement. The fork replaced its FlushState's ~7
+ *    register packets with one compound marker the ring understands (cod2_d3d_marcador_registro). Without
+ *    it the ring reads the register packets the way it always did. CoD2's equivalent of FlushState has not
+ *    been identified; docs/inventario-renderer-nativo.md §3.1 marks the changed-register-mask emitter as a
+ *    guess and says why, and that is the function this would hang off.
+ *
+ * Until (2) exists the renderer runs, answers the game's GPU-side expectations and records no draws, which
+ * is what the first milestone needs. The mechanism - the record queue, the record lifecycle, the
+ * register-mirror snapshot, the counters - is complete and starts being exercised the moment it arrives.
  */
+
+/*
+ * sub_8209BD78 is Call of Duty 2's shader constructor: r3 is the shader container on entry and the created
+ * shader object on return. One function for both stages, where the fork had two.
+ *
+ * WHY ONE AND NOT TWO, AND WHY THE STAGE IS READ FROM THE CONTAINER
+ *   The fork's two constructors differed only in which signature they expected. CoD2's branches on it
+ *   itself: `lwz r11,0(r31)` then `clrlwi r11,r11,25` (cod2_recomp.36.cpp:384-388) masks the container's
+ *   first word to 7 bits and picks 52 for a pixel shader against 592 for a vertex one - and 592 is exactly
+ *   the offset the fork's container layout uses for the vertex program. So the low bit of the signature at
+ *   +0 (0x102A0E00 pixel / 0x102A0E01 vertex) is the stage, and reading it here is the same answer the
+ *   constructor itself reaches.
+ *
+ * WHAT IT IS FOR
+ *   Nothing else identifies a shader reliably. By the time a vertex shader reaches the ring, Direct3D has
+ *   reordered its fetches, applied the vertex declaration's swizzles and nulled the outputs the pixel
+ *   shader does not read, so the microcode the ring sees is not the microcode in the container. The map
+ *   built here - object -> library entry - is what the ring looks that microcode up in.
+ *
+ * WHY THE OBJECT IS READ AFTER THE CALL AND NOT BEFORE
+ *   The constructor allocates it (sub_822E12E8) and returns it in r3 (cod2_recomp.36.cpp:488). Before the
+ *   call, r3 is the container, which is not what a later SetVertexShader will store in the device.
+ *
+ * COST
+ *   Three call sites in the whole program, so three times per shader the game ever creates. The hook reads
+ *   one word, calls the original and takes a lock once; it changes no PPC register.
+ *
+ * VERIFIED
+ *   The offsets, the single-constructor claim and the three call sites were read out of CoD2's generated
+ *   code and are cited above. NOT verified: that it runs. Nothing here has been on the console yet, so
+ *   what the log will say is a prediction, not a measurement - the counters it feeds are the ones
+ *   cod2_nativo_sistema.cpp already reports ("shader creado ... que no esta en la biblioteca").
+ */
+REX_EXTERN(__imp__sub_8209BD78);
+REX_HOOK_RAW(sub_8209BD78) {
+  namespace detalle = cod2::nativo::ganchos_detalle;
+  const uint32_t contenedor = ctx.r3.u32;
+  const bool vertices = contenedor != 0 && cod2::nativo::LeerBE(base + contenedor) == 0x102A0E01u;
+  const auto* entrada = detalle::IdentificarCreacion(base, contenedor, vertices);
+  __imp__sub_8209BD78(ctx, base);
+  detalle::RecordarCreacion(ctx.r3.u32, entrada, vertices);
+}
