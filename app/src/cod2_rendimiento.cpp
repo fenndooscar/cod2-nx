@@ -30,6 +30,17 @@
 //      goes to 1600 with it; off, nothing is changed at all and the port stays at 307.2 MHz. It does not
 //      force 1600 by itself, so it costs no battery on a console that has both.
 //
+//      The CPU clock is deliberately not touched, and it is not an oversight. The report says
+//      "CPU 1020.0 MHz", which is the stock handheld clock; 1785 MHz exists, but on this console it is only
+//      reachable through apm's CPU boost mode, and that mode is *fast load*: it raises the CPU and
+//      simultaneously drops the GPU to its minimum (ApmCpuBoostMode_FastLoad, libnx's apm.h). There is no
+//      profile with both, by Nintendo's design, because the two do not fit in the power budget together.
+//      Forcing the CPU up through clkrst instead does not work either, and this file already has the
+//      evidence: the same attempt on the memory clock was accepted eight times out of eight and reverted by
+//      pcv in under a second every time, because pcv reimposes the clocks of the active apm configuration.
+//      So the trade is "GPU 460.8 with CPU 1020" or "CPU 1785 with GPU 76.8", and a frame that is GPU-bound
+//      wants the first.
+//
 //   2. Two renderer defaults the SDK carries and this game never asked for, both of which multiply per-pixel
 //      cost. Neither is a guess about the guest: each one puts the renderer back on the behaviour the guest's
 //      own fetch constants and render target formats describe.
