@@ -340,13 +340,20 @@ declaring functions inside functions, and one hand-added entry in `app/huecos.to
        Vulkan, not the port**: with dynamic rendering, `vkCmdPipelineBarrier` must not be called inside a render
        pass instance unless the `dynamicRenderingLocalRead` and tile-image-read features are enabled
        (VUID-vkCmdPipelineBarrier-None-09553/09554), so every batch of pending barriers has to be recorded between
-       two pass instances. `VK_RENDERING_SUSPENDING_BIT`/`VK_RENDERING_RESUMING_BIT` would let the port keep the
-       pass alive across them — NVK really does implement it (it skips the linear-tile store and the resolve on
-       suspend, and the whole load/clear setup on resume: `mesa/mesa-switch/src/nouveau/vulkan/nvk_cmd_draw.c:1877`,
-       `:1999`, `:2086`) — and it was **rejected**: the flag has to be set in the *begin* info, so a pass would have
-       to be suspended before knowing whether it can be resumed, an abandoned suspension silently drops the store
-       and the MSAA resolve, and resuming after a compute dispatch gives up the rasterization-order guarantee
-       between the two halves of the pass, which is what the barrier was there to replace. Counters 46–48
+       two pass instances. NVK *does* advertise `VK_KHR_dynamic_rendering_local_read`
+       (`mesa/mesa-switch/src/nouveau/vulkan/nvk_physical_device.c:144`, `:516`) and the port could enable it, but
+       that does not help either: `VUID-vkCmdPipelineBarrier-srcStageMask-09556` requires that a barrier recorded
+       inside a `vkCmdBeginRendering` instance specify **only framebuffer-space stages**, and every barrier here is
+       transfer↔vertex-input or transfer↔compute, which are not framebuffer-space. And a pass cannot be suspended
+       across one instead: `VUID-vkCmdPipelineBarrier-suspended` forbids recording it between suspended pass
+       instances. `VK_RENDERING_SUSPENDING_BIT`/`VK_RENDERING_RESUMING_BIT` was rejected on top of that — NVK really
+       does implement it (it skips the linear-tile store and the resolve on suspend, and the whole load/clear setup
+       on resume: `mesa/mesa-switch/src/nouveau/vulkan/nvk_cmd_draw.c:1877`, `:1999`, `:2086`) — because the flag has
+       to be set in the *begin* info, so a pass would have to be suspended before knowing whether it can be
+       resumed, an abandoned suspension silently drops the store and the MSAA resolve, and resuming after a compute
+       dispatch gives up the rasterization-order guarantee between the two halves of the pass, which is what the
+       barrier was there to replace. **The pass count is pinned by the Vulkan barrier rules, not by the port.**
+       Counters 46–48
        (`barrera por contenido: memoria compartida entera | solo imagenes | otros buffers`) now say which of the 84
        is which, because only two of the three can be moved from the port side;
 
@@ -369,6 +376,32 @@ declaring functions inside functions, and one hand-added entry in `app/huecos.to
        `direct_host_resolve`, which is on by default in the SDK and whose `TryResolveCopyDirectly` ends in the same
        `DumpRenderTargets` the flag-off path calls, is now off in `app/src/cod2_rendimiento.cpp`: it made every one
        of the frame's 33.7 resolves do its rectangle and pipeline work twice;
+
+       **The native renderer is not the answer, and it is measurable that it is not.** `app/src/aparcado/` holds the
+       previous port's native renderer — 2 MB of source, including a 700 KB `cod2_nativo_dibujos.cpp` — and the
+       whole reason it cannot be brought back is not caution but arithmetic: of the **199 distinct `sub_XXXXXXXX`
+       addresses it hooks, 2 exist in Call of Duty 2's 20,944 generated functions** (`sub_821CF770`,
+       `sub_8245DD60`, both in files that are about audio and shadows, not rendering). It is the other game's
+       renderer, function by function. What the measurements do say is where a CoD2 one would have to go, and it
+       is not where the parked code points. The GPU frame is 138 ms (the fence wait of 595.8 ms per second divided
+       by 4.3 frames, and the CPU is idle for it: the frame is 232 ms and 94 ms of that is the port's own CPU
+       work). Of the 138 ms, removing every resolve takes 70 ms off (595.8 → 649.9 ms/s at 9.6 fps = 138 → 67.7 ms)
+       and removing every draw takes 57 ms off, which adds up: **the GPU frame is the port's resolve machinery plus
+       the guest's rasterization, and nothing else.**
+       The floor is the rasterization. `tijera` is 131.5 screens per frame, so the 175 draws ask for at most
+       131.5 × 1280 × 720 = 121 M pixels; GM20B in portable mode is 460.8 MHz with 8 ROPs, so 3.69 Gpixel/s, so
+       **33 ms of pure fill before a single pixel of the port's own work**, and 33 ms is exactly the frame budget
+       of 30 fps. The measured GPU frame is 138 ms, so the GPU is running at a quarter of its fill rate and the
+       other 105 ms is attachment round trips and the resolve dispatches — 93.5 passes × 14.3 MB of store and load
+       is 1.34 GB of colour alone, and depth makes it more. **30 fps at 720p is therefore out of reach on this
+       hardware, whatever the renderer**: even a port that resolved nothing and passed nothing would be at ~33 ms
+       of fill plus the CPU's 94 ms, and the CPU half does not shrink because the GPU got faster. What is reachable
+       is roughly 15 fps at 720p, or 30 fps at 480–540p — and the port has no downscale path at all
+       (`draw_resolution_scale` is only ever ≥ 1), so that is new work, not a setting. The one piece of the parked
+       renderer that *would* pay is the direct resolve the SDK itself left parked: `TryResolveCopyDirectly` is a
+       preflight that ends in `DumpRenderTargets`, `GetDirectResolvePipeline` hands back the EDRAM-reading copy
+       shader, and the fused "host image → shared memory in one dispatch" shader was never written. That is worth
+       the ~42 ms of dump compute and one of the two round trips per resolve, about 1.3×, not 7×;
     6. the guest busy-waits, once the GPU work fits;
     7. function ordering (done): `app/orden_funciones.ld` held 555 of the other game's addresses and matched nothing.
        It now holds Call of Duty 2's, regenerated with `tools/calientes.py` from `switch-logs/logs-old-1` — the
