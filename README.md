@@ -406,14 +406,17 @@ declaring functions inside functions, and one hand-added entry in `app/huecos.to
        `DumpRenderTargets` the flag-off path calls, is now off in `app/src/cod2_rendimiento.cpp`: it made every one
        of the frame's 33.7 resolves do its rectangle and pipeline work twice;
 
-       **The native renderer is not the answer, and it is measurable that it is not.** `app/src/aparcado/` holds the
-       previous port's native renderer — 2 MB of source, including a 700 KB `cod2_nativo_dibujos.cpp` — and the
-       whole reason it cannot be brought back is not caution but arithmetic: of the **199 distinct `sub_XXXXXXXX`
-       addresses it hooks, 2 exist in Call of Duty 2's 20,944 generated functions** (`sub_821CF770`,
-       `sub_8245DD60`, both in files that are about audio and shadows, not rendering). It is the other game's
-       renderer, function by function, and bringing it back means re-deriving those 199 functions from CoD2's own
-       `default.xex` before a line of it can run. What the measurements do say is where a CoD2 one would have to
-       go, and it is not where the parked code points.
+       **The parked native renderer cannot be revived, and that is an address audit, not a judgement call.**
+       `app/src/aparcado/` holds the previous port's native renderer — 2 MB of source, including a 700 KB
+       `cod2_nativo_dibujos.cpp` — and of the **199 distinct `sub_XXXXXXXX` addresses it hooks, 2 exist in Call of
+       Duty 2's 20,944 generated functions** (`sub_821CF770`, `sub_8245DD60`, both in files that are about audio and
+       shadows, not rendering). It is the other game's renderer, function by function, and bringing it back means
+       re-deriving those 199 functions from CoD2's own `default.xex` before a line of it can run. **What that
+       measures is the parked code, not the approach.** The approach is what took the other port from 1-3 fps to
+       32-35 fps, and a CoD2 renderer of that shape would be written against CoD2's own addresses, not this one's:
+       what is inherited and reusable is the method and the SDK-side plumbing (the ring reader, the Vulkan device,
+       the shader library), not the 199 hooks. Nothing here is a reason to conclude that 30 fps at 720p is out of
+       reach; it is a reason not to expect the parked files to provide it.
 
        **The GPU is where the frame is, and the port's own resolve machinery is the largest single piece of it.**
        `libnx por segundo` reports how much of every second is spent blocked inside `nvFenceWait` with a non-zero
