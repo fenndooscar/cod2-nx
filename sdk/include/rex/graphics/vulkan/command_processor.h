@@ -444,6 +444,10 @@ class VulkanCommandProcessor : public CommandProcessor {
   // clearing and stopping capturing. Returns whether the submission was done
   // successfully, if it has failed, leaves it open.
   bool EndSubmission(bool is_swap);
+  // cod2 - writes the closing timestamp of the submission being recorded and reads back the oldest slot that has
+  // not been consumed yet. Called from EndSubmission; see the members declared as cod2_marca_ below.
+  void Cod2MarcarFinalDeEnvio();
+  void Cod2RecogerMarcas();
   bool AwaitAllQueueOperationsCompletion() {
     CheckSubmissionFenceAndDeviceLoss(GetCurrentSubmission());
     return !submission_open_ && submissions_in_flight_fences_.empty();
@@ -772,11 +776,26 @@ class VulkanCommandProcessor : public CommandProcessor {
   struct VertexBufferState {
     uint32_t address = UINT32_MAX;
     uint32_t size = UINT32_MAX;
-  };
-  std::array<VertexBufferState, 96> vertex_buffer_states_{};
+  };  std::array<VertexBufferState, 96> vertex_buffer_states_{};
   uint64_t vertex_buffers_in_sync_[2] = {};
   std::unordered_map<uint64_t, ReadbackBuffer> readback_buffers_;
   std::unordered_map<uint64_t, ReadbackBuffer> memexport_readback_buffers_;
+
+  // cod2 - how long the GPU is actually busy, measured with timestamp queries written at the start and the end
+  // of every submission. Everything the port knew before this was the guest's *fence wait*, which is a lower
+  // bound on GPU busy time and cannot tell "the GPU is the wall" from "the guest and the GPU take turns"; this
+  // can. Read back a slot at a time without ever blocking (see the code in EndSubmission), accumulated into
+  // RexSwitchPerfAdd counters 49 and 50 and printed as "gpu: X ms por fotograma".
+  static constexpr uint32_t kCod2MarcaRanuras = 8;
+  VkQueryPool cod2_marca_pool_ = VK_NULL_HANDLE;
+  float cod2_marca_periodo_ns_ = 0.0f;
+  uint32_t cod2_marca_ranura_ = 0;
+  uint64_t cod2_marca_escritas_ = 0;
+  uint64_t cod2_marca_leidas_ = 0;
+  // Whether the submission being recorded got its opening timestamp, so that the closing one is only written if
+  // it did, and the slot is only counted as written if the submission was actually handed to the queue. A slot
+  // counted but never submitted would never become available and would stall the readback for good.
+  bool cod2_marca_abierta_ = false;
 
   // The current dynamic state of the graphics pipeline bind point. Note that
   // binding any pipeline to the bind point with static state (even if it's

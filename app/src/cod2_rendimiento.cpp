@@ -92,6 +92,17 @@ REXCVAR_DEFINE_BOOL(cod2_switch_ram_1600, true, "Graficos",
                     "respeta la memoria se intenta primero. En false, una consola sin ese perfil se queda en "
                     "307,2 MHz. El log [apm] dice cual entro");
 
+// The GPU timestamp counter on this chip does not run at the GPU's clock. NVK reports timestampPeriod = 1 ns
+// (limits.timestampPeriod), and it is wrong: the counter is the SoC's fixed 614.4 MHz reference, so one unit is
+// 1/614.4 MHz = 1.627 ns whatever the GPU is clocked at. Measured by comparing what the timestamps covered with
+// the wall clock (docs/measuring.md, "GPU timestamps on NVK under Horizon"). Without this the report would
+// understate every GPU time by 39 %. The knob is here, and not a constant in the renderer, because it is a
+// property of the driver that a future NVK may fix: the report prints the resulting share of the wall clock, so
+// a scale that is too large shows up as the GPU being busy more than 100 % of the time.
+REXCVAR_DEFINE_DOUBLE(cod2_marca_escala, 1.627, "Graficos",
+                      "Switch: nanosegundos por unidad del contador de marcas de tiempo de la GPU (1,627 = "
+                      "reloj fijo de 614,4 MHz; NVK informa de 1,0 y esta mal). Ver docs/measuring.md");
+
 namespace cod2::rendimiento {
 
 void PonerSiNadieLoPidio(const char* nombre, const char* valor) {

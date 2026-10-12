@@ -1924,6 +1924,46 @@ bool VulkanCommandProcessor::SetupContext() {
 
   occlusion_query_resources_available_ = InitializeOcclusionQueryResources();
 
+#if REX_PLATFORM_SWITCH
+  // cod2 - GPU busy time. A timestamp query pool, if the queue this port submits to can write timestamps at all.
+  // If it cannot, cod2_marca_pool_ stays null and the measurement silently does not happen: nothing else in the
+  // port depends on it.
+  {
+    const ui::vulkan::VulkanInstance::Functions& ifn =
+        vulkan_device->vulkan_instance()->functions();
+    const VkPhysicalDevice physical_device = vulkan_device->physical_device();
+    VkPhysicalDeviceProperties propiedades{};
+    ifn.vkGetPhysicalDeviceProperties(physical_device, &propiedades);
+    uint32_t familia = vulkan_device->queue_family_graphics_compute();
+    uint32_t familias = 0;
+    ifn.vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &familias, nullptr);
+    std::vector<VkQueueFamilyProperties> colas(familias);
+    ifn.vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &familias, colas.data());
+    bool valido = familia < familias && colas[familia].timestampValidBits != 0 &&
+                  propiedades.limits.timestampPeriod > 0.0f;
+    if (valido) {
+      VkQueryPoolCreateInfo info_marcas{};
+      info_marcas.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+      info_marcas.queryType = VK_QUERY_TYPE_TIMESTAMP;
+      info_marcas.queryCount = kCod2MarcaRanuras * 2;
+      if (dfn.vkCreateQueryPool(device, &info_marcas, nullptr, &cod2_marca_pool_) != VK_SUCCESS) {
+        cod2_marca_pool_ = VK_NULL_HANDLE;
+      } else {
+        // NVK reports timestampPeriod = 1 ns and it is not 1 ns: the counter is the SoC's fixed 614.4 MHz
+        // reference. cod2_marca_escala carries the measured conversion (docs/measuring.md). The query returns 0
+        // if the port's cvar is not registered, which would silently report zero GPU time, so fall back to 1.
+        const double escala = REXCVAR_QUERY(double, cod2_marca_escala);
+        cod2_marca_periodo_ns_ =
+            propiedades.limits.timestampPeriod * float(escala > 0.0 ? escala : 1.0);
+      }
+    }
+    REXLOG_INFO("[marcas] tiempo de GPU por envio {} (periodo {} ns, familia {} de {}, validBits {})",
+                cod2_marca_pool_ != VK_NULL_HANDLE ? "medido con marcas de tiempo" : "NO disponible",
+                double(cod2_marca_periodo_ns_), familia, familias,
+                familia < familias ? colas[familia].timestampValidBits : 0u);
+  }
+#endif
+
   // Just not to expose uninitialized memory.
   std::memset(&system_constants_, 0, sizeof(system_constants_));
 
@@ -5004,6 +5044,18 @@ void VulkanCommandProcessor::ShutdownOcclusionQueryResources() {
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   VkDevice device = vulkan_device->device();
 
+#if REX_PLATFORM_SWITCH
+  // cod2 - the GPU busy time query pool, if it was created.
+  if (cod2_marca_pool_ != VK_NULL_HANDLE) {
+    dfn.vkDestroyQueryPool(device, cod2_marca_pool_, nullptr);
+    cod2_marca_pool_ = VK_NULL_HANDLE;
+  }
+  cod2_marca_escritas_ = 0;
+  cod2_marca_leidas_ = 0;
+  cod2_marca_ranura_ = 0;
+  cod2_marca_abierta_ = false;
+#endif
+
   if (occlusion_query_readback_mapping_ && occlusion_query_readback_memory_ != VK_NULL_HANDLE) {
     dfn.vkUnmapMemory(device, occlusion_query_readback_memory_);
   }
@@ -5362,6 +5414,26 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
     // are fulfilled).
     deferred_command_buffer_.Reset();
 
+#if REX_PLATFORM_SWITCH
+    // cod2 - opening timestamp of this submission. Must be the first command of the deferred buffer (and it is:
+    // the buffer was just reset), so that the difference with the closing one written in EndSubmission is how
+    // long the GPU spent on this submission. Also resets the slot: a query must be reset between uses.
+    //
+    // Skipped entirely if the reader is a full lap behind, because then the reset would land on a query a
+    // submission still in flight may be writing. That needs the GPU to fall eight submissions behind, which the
+    // port has never been close to; the condition is here so that the measurement can never be the thing that
+    // breaks a frame.
+    if (cod2_marca_pool_ != VK_NULL_HANDLE &&
+        cod2_marca_escritas_ - cod2_marca_leidas_ < kCod2MarcaRanuras) {
+      deferred_command_buffer_.CmdVkResetQueryPool(cod2_marca_pool_, cod2_marca_ranura_ * 2, 2);
+      deferred_command_buffer_.CmdVkWriteTimestamp(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, cod2_marca_pool_,
+                                                   cod2_marca_ranura_ * 2);
+      cod2_marca_abierta_ = true;
+    } else {
+      cod2_marca_abierta_ = false;
+    }
+#endif
+
     // Reset cached state of the command buffer.
     dynamic_viewport_update_needed_ = true;
     dynamic_scissor_update_needed_ = true;
@@ -5453,6 +5525,56 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
 
   return true;
 }
+
+#if REX_PLATFORM_SWITCH
+// cod2 - how long the GPU is really busy. The only GPU number the port had before this was the guest's fence
+// wait, which is a lower bound: it says how long a guest thread blocked, not how much of that time the GPU was
+// working, and it cannot tell "the GPU is the wall" from "the guest and the GPU take turns and each one waits
+// for the other". These two timestamps can. They are written into the same submission as the work they measure,
+// TOP_OF_PIPE first and BOTTOM_OF_PIPE last, and read back without ever blocking, so the measurement costs
+// nothing measurable and cannot change the frame it is measuring.
+void VulkanCommandProcessor::Cod2MarcarFinalDeEnvio() {
+  if (!cod2_marca_abierta_) {
+    return;
+  }
+  // The flag stays set: the slot is only counted as written, and the rotation only advanced, once EndSubmission
+  // knows the submission really reached the queue (a failed submission must not leave a slot that never becomes
+  // available, or the readback would stall on it forever).
+  deferred_command_buffer_.CmdVkWriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, cod2_marca_pool_,
+                                               cod2_marca_ranura_ * 2 + 1);
+}
+
+void VulkanCommandProcessor::Cod2RecogerMarcas() {
+  if (cod2_marca_pool_ == VK_NULL_HANDLE) {
+    return;
+  }
+  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
+  const VkDevice device = vulkan_device->device();
+
+  // Slots are consumed strictly in the order they were written, so a slot that is not ready yet stops the loop
+  // instead of being skipped: submissions complete in order, so the next one will find it ready. The writer never
+  // lets the difference reach kCod2MarcaRanuras (see the opening timestamp in BeginSubmission), so the reader can
+  // never be lapped and the slot it is about to read is always one it has not read yet.
+  while (cod2_marca_leidas_ < cod2_marca_escritas_) {
+    uint64_t crudo[4] = {};
+    if (vulkan_device->functions().vkGetQueryPoolResults(
+            device, cod2_marca_pool_, uint32_t(cod2_marca_leidas_ % kCod2MarcaRanuras) * 2, 2,
+            sizeof(crudo), crudo, sizeof(uint64_t) * 2,
+            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) != VK_SUCCESS) {
+      return;
+    }
+    // Interleaved availability: one 64-bit value per query, with the availability flag after each result.
+    if (!crudo[1] || !crudo[3]) {
+      return;
+    }
+    ++cod2_marca_leidas_;
+    if (crudo[2] > crudo[0]) {
+      RexSwitchPerfAdd(49, uint64_t(double(crudo[2] - crudo[0]) * double(cod2_marca_periodo_ns_)));
+      RexSwitchPerfAdd(50, 1);
+    }
+  }
+}
+#endif
 
 bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
   const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
@@ -5595,6 +5717,12 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
 
     SubmitBarriers(true);
 
+#if REX_PLATFORM_SWITCH
+    // cod2 - closing timestamp, the last command of the submission. Outside any render pass: SubmitBarriers
+    // above has just ended it, and a timestamp cannot be recorded between suspended render pass instances.
+    Cod2MarcarFinalDeEnvio();
+#endif
+
     assert_false(command_buffers_writable_.empty());
     CommandBuffer command_buffer = command_buffers_writable_.back();
     if (dfn.vkResetCommandPool(device, command_buffer.pool, 0) != VK_SUCCESS) {
@@ -5670,6 +5798,18 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
     fences_free_.pop_back();
 
     submission_open_ = false;
+
+#if REX_PLATFORM_SWITCH
+    // cod2 - read back whatever has finished since the last time. Never blocks: a slot whose submission is still
+    // running reports "not available" and is left for the next submission. The slot only becomes readable once
+    // the submission reached the queue, which is what happened on the line above.
+    if (cod2_marca_abierta_) {
+      cod2_marca_abierta_ = false;
+      cod2_marca_ranura_ = (cod2_marca_ranura_ + 1) % kCod2MarcaRanuras;
+      ++cod2_marca_escritas_;
+    }
+    Cod2RecogerMarcas();
+#endif
   }
 
   if (is_closing_frame) {

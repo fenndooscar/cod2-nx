@@ -412,6 +412,22 @@ declaring functions inside functions, and one hand-added entry in `app/huecos.to
        ends in `DumpRenderTargets`, `GetDirectResolvePipeline` hands back the EDRAM-reading copy shader, and the
        fused "host image → shared memory in one dispatch" shader was never written. It attacks the 71 ms item
        above and is worth the dump compute and one of the two round trips per resolve;
+
+       **The port now measures how long the GPU is busy, instead of inferring it from how long the guest waited.**
+       The fence wait above is a lower bound and it cannot separate the two shapes that look identical from the
+       guest's side: a GPU that is the wall, and a guest and a GPU that take turns and each waits for the other. A
+       timestamp query written at `TOP_OF_PIPE` as the first command of every submission and at `BOTTOM_OF_PIPE` as
+       the last one measures the second shape directly, and the report's new line —
+       `gpu: N ms por fotograma ocupada, M % del tiempo de reloj` — is that number per presented frame and as a
+       share of the wall clock, next to `si fuera el limite, el juego iria a N fps`, which is what the frame rate
+       would be if the GPU work were the only thing in the frame. The measurement cannot change what it measures:
+       the readback is non-blocking (`VK_QUERY_RESULT_WITH_AVAILABILITY_BIT`), eight slots are rotated so a query is
+       never reset while a submission may still be writing it, a slot is only counted once its submission really
+       reached the queue, and the writer stops rather than lap the reader. `cod2_marca_escala` (default 1.627) is the
+       conversion from timestamp units to nanoseconds: NVK reports `timestampPeriod = 1 ns` and it is wrong — the
+       counter runs at the SoC's fixed 614.4 MHz, so one unit is 1.627 ns, which is what makes the share of the wall
+       clock come out under 100 % instead of 39 % low. A share above 100 % means the scale is too large;
+       [docs/measuring.md](measuring.md#gpu-timestamps-on-nvk-under-horizon) has the rest;
     6. the guest busy-waits, once the GPU work fits;
     7. function ordering (done): `app/orden_funciones.ld` held 555 of the other game's addresses and matched nothing.
        It now holds Call of Duty 2's, regenerated with `tools/calientes.py` from `switch-logs/logs-old-1` — the

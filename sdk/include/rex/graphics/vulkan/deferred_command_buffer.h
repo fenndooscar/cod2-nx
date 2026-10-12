@@ -273,6 +273,17 @@ class DeferredCommandBuffer {
     args.query_count = query_count;
   }
 
+  // cod2 - GPU busy time. `stage` is where the GPU writes the counter; the port uses TOP_OF_PIPE before the
+  // first command of a submission and BOTTOM_OF_PIPE after the last, so the difference is how long the GPU
+  // spent executing that submission.
+  void CmdVkWriteTimestamp(VkPipelineStageFlagBits stage, VkQueryPool query_pool, uint32_t query) {
+    auto& args = *reinterpret_cast<ArgsVkWriteTimestamp*>(
+        WriteCommand(Command::kVkWriteTimestamp, sizeof(ArgsVkWriteTimestamp)));
+    args.stage = stage;
+    args.query_pool = query_pool;
+    args.query = query;
+  }
+
   // pNext of all barriers must be null.
   void CmdVkPipelineBarrier(VkPipelineStageFlags src_stage_mask,
                             VkPipelineStageFlags dst_stage_mask, VkDependencyFlags dependency_flags,
@@ -381,6 +392,8 @@ class DeferredCommandBuffer {
     kVkSetStencilReference,
     kVkSetStencilWriteMask,
     kVkSetViewport,
+    // cod2 - GPU busy time measurement (command_processor.cpp, cod2_marca_).
+    kVkWriteTimestamp,
   };
 
   struct CommandHeader {
@@ -538,6 +551,12 @@ class DeferredCommandBuffer {
     static_assert(alignof(VkMemoryBarrier) <= alignof(uintmax_t));
     static_assert(alignof(VkBufferMemoryBarrier) <= alignof(uintmax_t));
     static_assert(alignof(VkImageMemoryBarrier) <= alignof(uintmax_t));
+  };
+
+  struct ArgsVkWriteTimestamp {
+    VkPipelineStageFlagBits stage;
+    VkQueryPool query_pool;
+    uint32_t query;
   };
 
   struct ArgsVkPushConstants {

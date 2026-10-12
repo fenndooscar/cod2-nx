@@ -86,7 +86,17 @@ tells how long the GPU work in between took.
   the GPU's work where a timestamp can be written. On NVK, `TOP_OF_PIPE` is written when the GPU reads the command,
   not when earlier work finishes. So times per pass taken with it give part of each pass to the next one.
   `BOTTOM_OF_PIPE` gives exact boundaries. With `BOTTOM_OF_PIPE` on both sides, a counter of "overlapping jobs" can
-  never be above zero, which leads to the next section.
+  never be above zero, which leads to the next section. **This does not spoil a whole-submission measurement**: on a
+  single queue, submission N+1's commands are not read until N has finished, so a `TOP_OF_PIPE` at the very start of
+  one and a `BOTTOM_OF_PIPE` at the very end of the same one bracket that submission's execution and nothing else.
+  That is what the port does now, and it is why the pair is written into the submission itself rather than around it.
+- **Where the port uses them.** `VulkanCommandProcessor::Cod2MarcarFinalDeEnvio` and `Cod2RecogerMarcas`
+  (`sdk/src/graphics/vulkan/command_processor.cpp`) write the pair into every submission, into a rotating set of
+  eight query slots, and read the finished ones back without ever blocking
+  (`VK_QUERY_RESULT_WITH_AVAILABILITY_BIT`). The report prints the result as
+  `gpu: N ms por fotograma ocupada, M % del tiempo de reloj`. `M` is the self-check: it is the GPU's busy time as a
+  share of the wall clock, so it must come out below 100 %, and if it does not, `cod2_marca_escala` is too large.
+  The scale is a cvar and not a constant because it is a property of the driver, not of the port.
 
 ## Counters that lie
 
@@ -184,9 +194,11 @@ chosen:
    mode measures GPU work removed, not CPU work removed, which is what makes the comparison against `normal` clean.
 6. **What is still missing: per-pass GPU time.** Nothing here says whether the frame is bound by the passes'
    bandwidth or by the pixels the draws shade; the scissor counter (counter 6) is the sum of every draw's scissor
-   rectangle without clipping, so it is an upper bound of an upper bound. That needs `vkCmdWriteTimestamp` at the
-   pass boundaries, read back a frame later, with the scale of the section above — the parked native renderer
-   (`app/src/aparcado/cod2_nativo_destinos.cpp`) has a working implementation to copy the plumbing from.
+   rectangle without clipping, so it is an upper bound of an upper bound. The *whole frame's* GPU busy time is now
+   measured (item 8), which is enough to say whether the GPU is the wall at all, but not which pass is. That needs
+   `vkCmdWriteTimestamp` at the pass boundaries, read back a frame later, with the scale of the section above — the
+   parked native renderer (`app/src/aparcado/cod2_nativo_destinos.cpp`) has a working implementation to copy the
+   plumbing from.
 7. **The GPU half of the frame, timed directly, and the trap in reading it.** The `libnx por segundo` line separates
    `fences consultadas` from `fences esperadas`, and that is not a style choice: `nvFenceWait(fence, 0)` and
    `nvFenceWait(fence, timeout)` behave differently (`sdk/src/ui/switch_perf.cpp`, the `nvFenceWait` wrapper), and
@@ -198,6 +210,16 @@ chosen:
    faster, it is other GPU-related blocking plus CPU work. The `CPU total %` on the report's first line is not the
    CPU half either, because a thread blocked inside `nvFenceWait` still counts as running. The only way to find the
    floor under all the GPU work is to remove all of it at once (`sin nada`).
+8. **How busy the GPU really was, which is the one thing the fence wait cannot say.** `esperadas` measures the guest
+   blocking, and a guest blocks just as long when the GPU is the wall as when the two are taking turns and each one
+   waits for the other — the two shapes are identical from the guest's side and need opposite fixes. The `gpu:` line
+   is the direct answer: GPU-busy milliseconds per presented frame and as a share of the wall clock, from the
+   timestamps of the section above. Read it as three cases. A share near the frame rate's own duty cycle with
+   `si fuera el limite, el juego iria a N fps` close to the measured fps means the GPU work *is* the frame and the
+   only way forward is less of it. A share well below that, with `N fps` far above the measured frame rate, means the
+   frame is mostly waiting on something that is not GPU execution — a fence that is signalled late, a driver
+   round trip, a guest thread — and cutting GPU work will not buy the frame rate it looks like it should. And a share
+   above 100 % means the scale is wrong, not that the GPU is overworked.
 
 ## Verifying a change
 

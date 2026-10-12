@@ -32,6 +32,10 @@ XE_UI_VULKAN_FUNCTION(vkCmdSetStencilCompareMask)
 XE_UI_VULKAN_FUNCTION(vkCmdSetStencilReference)
 XE_UI_VULKAN_FUNCTION(vkCmdSetStencilWriteMask)
 XE_UI_VULKAN_FUNCTION(vkCmdSetViewport)
+// cod2 - the UI layer does not use either of these; the Switch port needs them to measure how long the GPU is
+// really busy per submission, which is the one number that says whether the frame is GPU-bound or bound by the
+// guest and the GPU taking turns. See cod2_marca_ in VulkanCommandProcessor.
+XE_UI_VULKAN_FUNCTION(vkCmdWriteTimestamp)
 XE_UI_VULKAN_FUNCTION(vkCreateBuffer)
 XE_UI_VULKAN_FUNCTION(vkCreateBufferView)
 XE_UI_VULKAN_FUNCTION(vkCreateCommandPool)
@@ -72,6 +76,7 @@ XE_UI_VULKAN_FUNCTION(vkGetBufferMemoryRequirements)
 XE_UI_VULKAN_FUNCTION(vkGetDeviceQueue)
 XE_UI_VULKAN_FUNCTION(vkGetFenceStatus)
 XE_UI_VULKAN_FUNCTION(vkGetImageMemoryRequirements)
+XE_UI_VULKAN_FUNCTION(vkGetQueryPoolResults)
 XE_UI_VULKAN_FUNCTION(vkInvalidateMappedMemoryRanges)
 XE_UI_VULKAN_FUNCTION(vkMapMemory)
 XE_UI_VULKAN_FUNCTION(vkResetCommandPool)

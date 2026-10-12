@@ -108,7 +108,7 @@ constexpr u64 kAbReportSeconds = 5;
 constexpr u64 kStartDelayNs = 8000000000ULL;
 constexpr size_t kMaxSamples = 1 << 15;
 constexpr size_t kFrames = 10;
-constexpr unsigned kCounterCount = 49;
+constexpr unsigned kCounterCount = 51;
 // In <NRO folder>/logs/rex/ (switch_crash_hooks.c computes it at startup).
 std::string ReportPath() {
   return std::string(RexSwitchLogDir()) + "rex_perfil.log";
@@ -552,6 +552,21 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
                  delta(9) / frames, delta(10) / frames / 921600.0, delta(11) / frames,
                  delta(41) / frames, delta(12) / frames, delta(13) / frames, delta(14) / frames,
                  delta(15) / frames / 1048576.0, delta(16));
+    // How long the GPU was actually busy, timed with timestamp queries written at the start and the end of every
+    // submission (see Cod2MarcarFinalDeEnvio). This is the number that decides whether the frame is GPU-bound or
+    // whether the guest and the GPU are taking turns: the guest's own fence wait (the "esperadas" figure above)
+    // is a lower bound on GPU busy time and cannot tell those two apart, because a thread can block on a fence
+    // that was already signalled, or on one whose submission is only a fraction of the GPU's queue.
+    //
+    // "envios medidos" is how many submissions the figure is an average over; if it is far below the submission
+    // count above, the queue is so deep that the timestamps are still in flight, and the figure is the sum over
+    // the older part of the interval only - which is still a valid total, just not a per-frame average.
+    std::fprintf(f,
+                 "     gpu: %.1f ms por fotograma ocupada, %.0f %% del tiempo de reloj en los ultimos %.1f s "
+                 "(%llu envios medidos, %.2f por fotograma) | si fuera el limite, el juego iria a %.1f fps\n",
+                 delta(49) / 1.0e6 / frames, delta(49) / 1.0e9 / seconds * 100.0, seconds,
+                 (unsigned long long)delta(50), delta(50) / frames,
+                 delta(49) > 0.0 ? 1000.0 / (delta(49) / 1.0e6 / frames) : 0.0);
     std::fprintf(f,
                  "     dibujados por ancho de superficie: 1600+ %.0f | 1280-1599 %.0f | "
                  "640-1279 %.0f | 256-639 %.0f | menos de 256 %.0f\n",
@@ -1135,7 +1150,9 @@ void RexSwitchPerfCount(unsigned id) {
  * chunks committed on touch, 18 chunks mapped into a view on touch,
  * 21 clipped audio samples, 22 audio buffers with a peak of 0.98 or more,
  * 33 render pass ends (tile buffer stored and reloaded), 34 draws with a
- * whole-shared-memory barrier.
+ * whole-shared-memory barrier, 49 GPU nanoseconds busy (timestamp queries,
+ * see Cod2MarcarFinalDeEnvio), 50 submissions those nanoseconds were
+ * measured over.
  */
 void RexSwitchPerfAdd(unsigned id, u64 value) {
   if (id < kCounterCount) {
