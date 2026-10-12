@@ -51,6 +51,12 @@
 //   Both are set through PonerSiNadieLoPidio, so a value given in cod2.toml or on the command line wins and
 //   neither change needs a rebuild to undo.
 //
+//   3. direct_host_resolve = false. The SDK's direct-resolve path (render_target_cache.cpp,
+//      TryResolveCopyDirectly) is a preflight that always falls through to the same DumpRenderTargets the
+//      non-direct path calls, so with it on every resolve derives its rectangles and looks up its pipelines
+//      twice and the GPU work is identical. The round-22 report has 33.7 resolves per frame, all of them on the
+//      busiest thread. Off, the dump happens once.
+//
 // WHY IT WAS NOT THERE
 //   The clock half lived in src/aparcado/cod2_ajustes_graficos.cpp, parked along with the inherited native
 //   renderer. Nothing in this tree called it, so the request never happened. The apm half does not depend on
@@ -60,10 +66,10 @@
 // HOW TO TURN IT OFF WITHOUT A REBUILD
 //   cod2_switch_gpu_mhz = 0 in cod2.toml leaves the console's clocks exactly as they were;
 //   anisotropic_override = 3 puts the forced 4x back; gamma_render_target_as_unorm16 = true puts the
-//   sixteen-bit gamma target back. How to check that the clock took effect: the next profiler report says
-//   "relojes: ... GPU 460.8 MHz ...". apm hands the change to pcv, so it lands a moment after the request,
-//   not on the next line. The two renderer settings only take effect at startup, because the render target
-//   cache and the samplers are built once.
+//   sixteen-bit gamma target back; direct_host_resolve = true puts the duplicate resolve preflight back. How to
+//   check that the clock took effect: the next profiler report says "relojes: ... GPU 460.8 MHz ...". apm hands
+//   the change to pcv, so it lands a moment after the request, not on the next line. The three renderer settings
+//   only take effect at startup, because the render target cache and the samplers are built once.
 
 #include "cod2_rendimiento.h"
 
@@ -107,6 +113,12 @@ void AplicarRendimiento() {
   // Eight bits per channel for the gamma render target, which is what the EDRAM holds and what the D3D12
   // backend uses: half the bytes and twice the colour write rate of R16G16B16A16_UNORM.
   PonerSiNadieLoPidio("gamma_render_target_as_unorm16", "false");
+  // The SDK's "direct host resolve" is on by default and never resolves anything directly: TryResolveCopyDirectly
+  // runs its whole preflight and then ends at render_target_cache.cpp's `return DumpRenderTargets(...)`, which is
+  // exactly what the caller would have done with the flag off - and DumpRenderTargets derives the same rectangles
+  // and looks up the same pipelines a second time. In game that is 33.7 resolves per frame (round-22 report) each
+  // paying for the work twice on the thread that is already the frame's critical path. Off, the dump happens once.
+  PonerSiNadieLoPidio("direct_host_resolve", "false");
   REXLOG_INFO("[rendimiento] aniso del invitado, gamma de 8 bits, y relojes:");
 #if REX_PLATFORM_SWITCH
   const int mhz = REXCVAR_GET(cod2_switch_gpu_mhz);

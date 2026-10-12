@@ -324,6 +324,51 @@ declaring functions inside functions, and one hand-added entry in `app/huecos.to
        `sin nada`), where `sin nada` against `normal` is the whole cost of the GPU work and a `sin nada` that is
        just as slow as `normal` means the cost is not in the work at all. `tools/perfil_consola.py` reads those
        reports in a table of their own. See [docs/measuring.md](measuring.md#splitting-a-frame-that-is-cut-into-render-passes);
+
+       **The A/B answered, and it answered no.** `switch-logs/logs` (2026-10-12, the round-22 set: 13 reports, one
+       per skip mode, 10 s each, in game) gives **4.3 FPS** for `normal` and, for the modes that did run, `sin
+       dibujados` 9.0, `sin transferencias` 6.8, `sin resolves` **9.6**, `sin cargas de texturas` 6.4, `sin efecto
+       de presentacion` 5.9 — the rotation stopped after five of the eight modes, so `sin nada` was never measured.
+       Removing *all* of the resolve dispatches is the best single cut and it is **2.2×**, not 7×, and the CPU total
+       stays at 258 % of 400 % in every mode: the GPU work is about half the frame and the rest is not GPU work at
+       all. The render area did what it was supposed to (`area 668.60 MB ÷ 93.5 passes = 7.15 MB`, i.e. 3.57 MB per
+       store and 3.57 MB per load, which is the guest's 1280×698 and not the 10 MB EDRAM allocation), so the
+       remaining lever on that axis is the pass count alone. It is 93.5, of which `pases por motivo` says `destino
+       9.1 | barrera 83.9 | barrera vacia 0.0 | otra 0.5`, and `pases por clase` says `dibujados 76.1 (556.05 MB) |
+       transferencias 17.4 (112.56 MB)`: 84 of the 93 passes are the port's own synchronization, and 81 % of the
+       attachment traffic is the guest's drawing inside them. **The reason the passes cannot simply be merged is
+       Vulkan, not the port**: with dynamic rendering, `vkCmdPipelineBarrier` must not be called inside a render
+       pass instance unless the `dynamicRenderingLocalRead` and tile-image-read features are enabled
+       (VUID-vkCmdPipelineBarrier-None-09553/09554), so every batch of pending barriers has to be recorded between
+       two pass instances. `VK_RENDERING_SUSPENDING_BIT`/`VK_RENDERING_RESUMING_BIT` would let the port keep the
+       pass alive across them — NVK really does implement it (it skips the linear-tile store and the resolve on
+       suspend, and the whole load/clear setup on resume: `mesa/mesa-switch/src/nouveau/vulkan/nvk_cmd_draw.c:1877`,
+       `:1999`, `:2086`) — and it was **rejected**: the flag has to be set in the *begin* info, so a pass would have
+       to be suspended before knowing whether it can be resumed, an abandoned suspension silently drops the store
+       and the MSAA resolve, and resuming after a compute dispatch gives up the rasterization-order guarantee
+       between the two halves of the pass, which is what the barrier was there to replace. Counters 46–48
+       (`barrera por contenido: memoria compartida entera | solo imagenes | otros buffers`) now say which of the 84
+       is which, because only two of the three can be moved from the port side;
+
+       **The other half of the frame is the guest's own CPU, and one thread is the critical path.**
+       `XThreadB513080` runs at 90.4 % of a core and `Main XThread` at 88.2 %, and `Main XThread` spends **90.6 % of
+       its samples in a single instruction** — the spin at `sub_823800D8+0x510` (`ldr w1,[x0]; cbnz w1,-4` over the
+       guest lock word at `0x83631030`, `-2090663936 + 3672 + 472`, which is `loc_82380114` in
+       `app/generated/default/cod2_recomp.44.cpp`), verified in the built NRO at host offset `0x28f0`, so clang did
+       not hoist the load. It is waiting for `XThreadB513080`, which is inside the guest's own lock manager
+       (`sub_823744E8` → `sub_8237FE40` release / `sub_8236D0D0` acquire), and that thread's time is 38 % in
+       `sub_8237FE40`, 14 % in `sub_820A5E78`, 10 % in `sub_8236D0D0` and about **25 % in
+       `KeGetCurrentProcessType_entry` and its `HostToGuestFunction` wrapper** — `sub_820A5E78` calls it once per
+       lock operation. Two changes in `sdk/src/kernel/xboxkrnl/xboxkrnl_threading.cpp` attack that: the guest's
+       `KeGetCurrentProcessType` is now a raw hook (`REX_FUNC(__imp__KeGetCurrentProcessType)`) that reads the PCR
+       address straight out of `ctx.r13`, which is what the caller already handed it — `REX_EXPORT` threw the
+       context away and `HostToGuestFunction` rebuilt it from the thread-local `ThreadState`, three dependent
+       pointer chases for a register in hand, plus the `XThread::GetCurrentThread()` call; and the two
+       `Memory::TranslateVirtual` calls per invocation are cached per host thread, because the translation is a
+       pure function of the guest address (see the comment on `cod2_traducir_proceso_cacheado` in that file).
+       `direct_host_resolve`, which is on by default in the SDK and whose `TryResolveCopyDirectly` ends in the same
+       `DumpRenderTargets` the flag-off path calls, is now off in `app/src/cod2_rendimiento.cpp`: it made every one
+       of the frame's 33.7 resolves do its rectangle and pipeline work twice;
     6. the guest busy-waits, once the GPU work fits;
     7. function ordering (done): `app/orden_funciones.ld` held 555 of the other game's addresses and matched nothing.
        It now holds Call of Duty 2's, regenerated with `tools/calientes.py` from `switch-logs/logs-old-1` — the

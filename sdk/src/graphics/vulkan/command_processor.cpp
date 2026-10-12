@@ -3126,6 +3126,27 @@ bool VulkanCommandProcessor::SubmitBarriers(bool force_end_render_pass) {
     }
     return false;
   }
+#if REX_PLATFORM_SWITCH
+  // Counters 46-48. "barrera" is 84 of the frame's 93.5 passes (round-22 report) and each one stores and
+  // reloads the render area, so which barrier is in the batch is what says where to cut. The whole-buffer
+  // shared memory barrier is the one VulkanSharedMemory::Use pushes whenever the guest's use of the shared
+  // memory buffer changes between reading and writing, which with 33.9 texture loads, 33.7 resolves and 175
+  // draws per frame happens constantly. An image-only batch is the guest's own render-target-as-texture and
+  // texture-load ordering, which only the guest can remove. The rest is the port's scratch buffers.
+  {
+    const VkBuffer memoria_compartida =
+        shared_memory_ ? shared_memory_->buffer() : VK_NULL_HANDLE;
+    bool hay_entera = false;
+    bool hay_buffer = false;
+    for (const VkBufferMemoryBarrier& barrera : pending_barriers_buffer_memory_barriers_) {
+      hay_buffer = true;
+      if (barrera.buffer == memoria_compartida && barrera.size == VK_WHOLE_SIZE) {
+        hay_entera = true;
+      }
+    }
+    RexSwitchPerfCount(hay_entera ? 46u : (hay_buffer ? 48u : 47u));
+  }
+#endif
   EndRenderPass(RazonDePase::kBarrera);
   for (auto it = pending_barriers_.cbegin(); it != pending_barriers_.cend(); ++it) {
     auto it_next = std::next(it);

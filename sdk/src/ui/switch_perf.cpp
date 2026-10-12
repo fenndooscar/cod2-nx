@@ -95,6 +95,11 @@ std::string StackFlagPath() {
   return std::string(RexSwitchLogDir()) + "perfil_pilas.flag";
 }
 constexpr u64 kReportSeconds = 10;
+// While the A/B is rotating, a report per mode of this length instead. The rotation is eight modes long and the
+// player has to hold L+R+ZL through all of it: at 10 s per mode that was 80 s, and the round-22 session stopped
+// after five, which is exactly the report that mattered ("sin nada") never being reached. Five seconds is still
+// tens of frames at the frame rates this game runs at.
+constexpr u64 kAbReportSeconds = 5;
 /*
  * Let the game start first. This only delays stack sampling and the first report, which read the
  * SD and pause threads. The console overlays (FPS and resolution) are published from second zero:
@@ -103,7 +108,7 @@ constexpr u64 kReportSeconds = 10;
 constexpr u64 kStartDelayNs = 8000000000ULL;
 constexpr size_t kMaxSamples = 1 << 15;
 constexpr size_t kFrames = 10;
-constexpr unsigned kCounterCount = 46;
+constexpr unsigned kCounterCount = 49;
 // In <NRO folder>/logs/rex/ (switch_crash_hooks.c computes it at startup).
 std::string ReportPath() {
   return std::string(RexSwitchLogDir()) + "rex_perfil.log";
@@ -196,13 +201,15 @@ struct Mode {
 };
 constexpr Mode kModes[] = {
     {0, "normal"},
+    // Second, not last: this is the report that decides whether the GPU work is the wall at all, and it is the
+    // one the round-22 session never reached. Everything after it is only worth reading once this one is known.
+    {63, "sin nada"},
     {1, "sin dibujados"},
     {2, "sin transferencias"},
     {4, "sin resolves"},
     {8, "sin cargas de texturas"},
     {16, "sin efecto de presentacion"},
     {32, "sin despacho por baldosas"},
-    {63, "sin nada"},
 };
 constexpr size_t kModeCount = sizeof(kModes) / sizeof(kModes[0]);
 
@@ -223,11 +230,18 @@ constexpr size_t kModeCount = sizeof(kModes) / sizeof(kModes[0]);
  */
 std::atomic<bool> g_ab_activas{false};
 std::atomic<u32> g_skip_mask{0};
+// Which mode of kModes the rotation is on. File scope so that starting the rotation always restarts it at
+// "normal": otherwise the sequence depends on where the previous one stopped, and a session that is interrupted
+// twice never measures the same set of modes.
+std::atomic<size_t> g_modo_ab{0};
 
 extern "C" void RexSwitchPerfToggleAb(void) {
   const bool nuevo = !g_ab_activas.load(std::memory_order_relaxed);
   g_ab_activas.store(nuevo, std::memory_order_relaxed);
-  if (!nuevo) {
+  if (nuevo) {
+    g_modo_ab.store(0, std::memory_order_relaxed);
+    g_skip_mask.store(kModes[0].mask, std::memory_order_relaxed);
+  } else {
     g_skip_mask.store(0, std::memory_order_relaxed);
   }
 }
@@ -570,6 +584,16 @@ void Report(u64 elapsed_ticks, u64 tick_freq, u64 counters_last[kCounterCount],
                  "consultas de oclusion %.1f\n",
                  delta(36) / frames, delta(37) / frames, delta(38) / frames, delta(39) / frames,
                  delta(40) / frames);
+    // What was in the barrier batch of the "barrera" passes above. Those passes store and reload the render
+    // area, so this is where the count has to come down, and only the port can move two of the three: the
+    // whole-buffer shared memory barrier is VulkanSharedMemory::Use changing the guest's use of that buffer
+    // between reading and writing, and the other-buffer one is the port's scratch buffers (guest DMA indices).
+    // An image-only batch is the guest's own ordering of a render target it is about to sample, which no change
+    // in the port removes.
+    std::fprintf(f,
+                 "     barrera por contenido: memoria compartida entera %.1f | solo imagenes %.1f | otros "
+                 "buffers %.1f\n",
+                 delta(46) / frames, delta(47) / frames, delta(48) / frames);
     // The same passes split by what they are for, which is the split that decides who can remove them. The
     // "dibujados" passes are the guest's own drawing - only drawing less removes them. The "transferencias" ones
     // are the port materializing render target contents so they can be sampled as textures and clearing resolved
@@ -865,7 +889,6 @@ void ProfilerMain(void*) {
   report_start = armGetSystemTick();
 
   size_t rr = 0;
-  size_t mode_index = 0;
   while (true) {
     __real_svcSleepThread(sample_stacks ? kSampleIntervalNs : kPassiveIntervalNs);
 
@@ -913,12 +936,17 @@ void ProfilerMain(void*) {
     const u64 now = armGetSystemTick();
     // Once per second, FPS and resolution for the overlay (the profile report runs every 10 s).
     overlay.Paso(now, tick_freq, true);
-    if (now - report_start >= kReportSeconds * tick_freq) {
-      Report(now - report_start, tick_freq, counters_last, kModes[mode_index].name);
+    const size_t modo = g_modo_ab.load(std::memory_order_relaxed);
+    const u64 intervalo = (g_ab_activas.load(std::memory_order_relaxed) ? kAbReportSeconds
+                                                                        : kReportSeconds) *
+                          tick_freq;
+    if (now - report_start >= intervalo) {
+      Report(now - report_start, tick_freq, counters_last, kModes[modo].name);
       if (g_ab_activas.load(std::memory_order_relaxed)) {
-        mode_index = (mode_index + 1) % kModeCount;
-        g_skip_mask.store(kModes[mode_index].mask, std::memory_order_relaxed);
-        if (mode_index == 0) {
+        const size_t siguiente = (modo + 1) % kModeCount;
+        g_modo_ab.store(siguiente, std::memory_order_relaxed);
+        g_skip_mask.store(kModes[siguiente].mask, std::memory_order_relaxed);
+        if (siguiente == 0) {
           // Full cycle: it turns itself off and the game looks right again.
           g_ab_activas.store(false, std::memory_order_relaxed);
         }

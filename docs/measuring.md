@@ -147,6 +147,17 @@ chosen:
    half is the port copying render target contents out so they can be sampled as textures, which the Xbox 360's
    EDRAM made free. Summing the two and comparing with `pases/fot` also shows whether the frame leaves passes open
    at the end.
+   **Why the count cannot simply be brought down.** With dynamic rendering, `vkCmdPipelineBarrier` must not be
+   recorded inside a render pass instance unless `dynamicRenderingLocalRead` and the tile-image-read features are
+   enabled (`VUID-vkCmdPipelineBarrier-None-09553` and `-09554`), so every batch of pending barriers has to be
+   recorded between two pass instances. `VK_RENDERING_SUSPENDING_BIT`/`VK_RENDERING_RESUMING_BIT` would let the
+   pass stay open across them and NVK implements it faithfully (it drops the linear-tile store and the resolve on
+   suspend and skips the whole load and clear setup on resume:
+   `mesa/mesa-switch/src/nouveau/vulkan/nvk_cmd_draw.c:1877`, `:1999`, `:2086`), but the flags are part of the
+   *begin* info, so a pass would have to be suspended before the port knows whether the next begin can resume it;
+   an abandoned suspension silently drops the store and the MSAA resolve. Counters 46-48 (`barrera por contenido`)
+   say whether the barrier that ended each pass was the whole-buffer shared memory barrier, an image-only batch, or
+   a scratch buffer, because only the first two are the port's own.
 4. **The A/B that decides whether any of it is the wall.** Play the same spot twice in one session, once with
    `cod2_area_de_dibujo_ajustada` at its default and once with it `false`, and compare `area MB/f` and the frame
    rate. If turning the area off costs the predicted 2.8x of attachment traffic and the frame rate barely moves,
@@ -154,14 +165,23 @@ chosen:
    that matters, because it is the one that stops the next round from being another blind guess. Do not read the
    frame rate of one run alone: the game's own scene changes more than the change under test does.
 5. **The same question, answered by removing the work instead of by counting it.** Holding **L+R+ZL** in game
-   starts a rotation that removes one part of the GPU work per ten-second report, in this order: `normal`,
-   `sin dibujados` (no draws), `sin transferencias`, `sin resolves`, `sin cargas de texturas`, `sin efecto de
-   presentacion`, `sin despacho por baldosas`, `sin nada` (all of it), and then back to `normal`. Each report says
-   which mode it was in, so the eight modes are eight measurements of the same spot, and the difference between
-   `normal` and `sin nada` is the whole cost of the GPU work. The image is wrong while a mode lasts, which is
-   expected. If `sin nada` is just as slow as `normal`, the cost is not in the work at all but in something fixed
-   (submissions, the driver, the fence waits), and no amount of cutting draws or passes will help. This is the
-   cheapest measurement in this list and the one that has never been run in this port.
+   starts a rotation that removes one part of the GPU work per report, in this order: `normal`, `sin nada` (all of
+   it), `sin dibujados` (no draws), `sin transferencias`, `sin resolves`, `sin cargas de texturas`, `sin efecto de
+   presentacion`, `sin despacho por baldosas`, and then back to `normal`. Each report says which mode it was in, so
+   the eight modes are eight measurements of the same spot, and the difference between `normal` and `sin nada` is
+   the whole cost of the GPU work. The image is wrong while a mode lasts, which is expected. If `sin nada` is just
+   as slow as `normal`, the cost is not in the work at all but in something fixed (submissions, the driver, the
+   fence waits), and no amount of cutting draws or passes will help. This is the cheapest measurement in this list
+   and the one that has never been run in this port: the round-22 session of 2026-10-12 stopped after five of the
+   eight modes, and `sin nada` was one of the three it never reached.
+   **The reports are five seconds long while the rotation is on** (ten when it is not), so a full cycle is 40 s of
+   holding the buttons rather than 80, and `sin nada` — the one report the whole measurement exists for — comes
+   second rather than last. A five-second report is still tens of frames at these frame rates. The rotation always
+   restarts at `normal`, so an interrupted session does not shift the sequence.
+   What the modes do and do not remove: `RexSwitchPerfSkip` guards the *Vulkan call* at each site, not the work the
+   port does to record it (`sdk/src/ui/switch_perf.cpp`, `RexSwitchPerfSkip`). `sin dibujados` therefore still
+   reports ~164 draws per frame and `sin resolves` still runs the whole transfer and render-pass machinery. Each
+   mode measures GPU work removed, not CPU work removed, which is what makes the comparison against `normal` clean.
 6. **What is still missing: per-pass GPU time.** Nothing here says whether the frame is bound by the passes'
    bandwidth or by the pixels the draws shade; the scissor counter (counter 6) is the sum of every draw's scissor
    rectangle without clipping, so it is an upper bound of an upper bound. That needs `vkCmdWriteTimestamp` at the

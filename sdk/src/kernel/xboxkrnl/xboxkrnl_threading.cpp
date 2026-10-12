@@ -19,7 +19,9 @@
 #include <vector>
 
 #include <rex/chrono/clock.h>
+#include <rex/cvar.h>
 #include <rex/dbg.h>
+#include <rex/platform.h>
 #include <rex/kernel/xboxkrnl/private.h>
 #include <rex/kernel/xboxkrnl/threading.h>
 #include <rex/logging.h>
@@ -38,6 +40,39 @@
 #include <rex/system/xtypes.h>
 #include <rex/thread/atomic.h>
 #include <rex/thread/mutex.h>
+
+#if REX_PLATFORM_SWITCH
+// cod2 - the guest asks for its own process type thousands of times per frame, and this is where the port pays
+// for it.
+//
+// THE FAILURE
+//   switch-logs/logs/rex/rex_perfil.log (2026-10-12, the round-22 A/B, the 4.3 FPS in-game report) has two
+//   guest threads at about 90 % of a core each. The busiest one, "XThreadB513080", spends 90.4 % of its
+//   samples inside sub_8237FE40, sub_8236D0D0, sub_820A5E78, KeGetCurrentProcessType_entry, its
+//   HostToGuestFunction wrapper (imagen+0x19260), XThread::GetCurrentThread and Memory::LookupHeap - and this
+//   function and its wrapper are roughly a quarter of that thread. sub_8237FE40 and sub_8236D0D0 are the
+//   guest's lock release and acquire and call sub_820A5E78, which calls this, once per operation.
+//
+// THE EVIDENCE
+//   Memory::TranslateVirtual (sdk/include/rex/system/xmemory.h:387) is virtual_membase_ + guest_address plus
+//   the heap's host_address_offset. LookupHeap only picks one of the fixed heaps that live inside the Memory
+//   object itself: its disassembly (app/out/sw8/cod2, host offset 0x43670) is a handful of range compares that
+//   return `this + constant`, with no load and no allocation. So the host pointer for a given guest address
+//   cannot change while the process lives, and translating the same two addresses again on every call is pure
+//   waste. What has to stay fresh is the *contents*: the PCR and the KTHREAD are guest memory the guest
+//   rewrites, so only the translation is cached and the fields are read through it every time.
+//
+// WHAT IT DOES
+//   Keeps the last guest -> host translation per host thread, one for the PCR and one for the current KTHREAD,
+//   and re-reads through it. Same value, no LookupHeap on the hot path.
+//
+// HOW TO TURN IT OFF WITHOUT A REBUILD
+//   cod2_traducir_proceso_cacheado = false in cod2.toml. Nothing else in the port uses this cache, and
+//   turning it off can only make the frame slower.
+REXCVAR_DEFINE_BOOL(cod2_traducir_proceso_cacheado, true, "Graficos",
+                    "Switch: recordar la traduccion invitado->anfitrion del PCR y del hilo actual al pedir el "
+                    "tipo de proceso del invitado, que el juego pide miles de veces por fotograma");
+#endif
 
 namespace rex::kernel::xboxkrnl {
 using namespace rex::system;
@@ -338,19 +373,70 @@ u32 KeSetDisableBoostThread_entry(ppc_ptr_t<X_KTHREAD> thread_ptr, u32 disabled)
   return old_boost_disabled;
 }
 
-u32 KeGetCurrentProcessType_entry() {
-  auto current_thread = XThread::GetCurrentThread();
-  auto context = current_thread->thread_state()->context();
-  auto pcr =
-      REX_KERNEL_MEMORY()->TranslateVirtual<X_KPCR*>(static_cast<uint32_t>(context->r13.u64));
+#if REX_PLATFORM_SWITCH
+// The translation cache whose rationale is in the header comment of cod2_traducir_proceso_cacheado, at the top
+// of this file.
+struct TraduccionProceso {
+  uint32_t invitado = 0;
+  void* anfitrion = nullptr;
+};
+// One per host thread: the PCR address (r13) and the KTHREAD are per guest thread, and several guest threads
+// share a host thread only if the port ever schedules them that way, in which case the address changes and the
+// cache simply misses.
+static thread_local TraduccionProceso g_traduccion_pcr;
+static thread_local TraduccionProceso g_traduccion_hilo;
 
-  if (pcr->prcb_data.dpc_active) {
-    return pcr->processtype_value_in_dpc;
+template <typename T>
+static T* TraducirProceso(const memory::Memory* memoria, uint32_t direccion,
+                          TraduccionProceso& cache) {
+  if (cache.anfitrion != nullptr && cache.invitado == direccion) {
+    return reinterpret_cast<T*>(cache.anfitrion);
   }
-
-  auto thread = REX_KERNEL_MEMORY()->TranslateVirtual<X_KTHREAD*>(pcr->prcb_data.current_thread);
-  return thread->process_type;
+  T* anfitrion = memoria->TranslateVirtual<T*>(direccion);
+  if (anfitrion != nullptr) {
+    cache.invitado = direccion;
+    cache.anfitrion = anfitrion;
+  }
+  return anfitrion;
 }
+#endif
+
+// cod2 - the guest's KeGetCurrentProcessType, without the two hops and the TLS read the SDK's own version had.
+// The guest calls it through its import thunk, so the generated code already has the PPCContext in hand and
+// passes it to the hook - REX_EXPORT then throws it away and HostToGuestFunction rebuilds the guest state from
+// the thread-local ThreadState, which is three dependent pointer chases (XThread -> ThreadState -> PPCContext)
+// to reach a register the caller just handed us. The PCR address is r13, and the SDK already trusts it for
+// exactly this purpose in xeKeKfAcquireSpinLock and xeKfRaiseIrql (see the comment above xeKeKfAcquireSpinLock).
+// The profile of 2026-10-12 has this function and its wrapper at roughly a quarter of the busiest guest thread,
+// and sub_820A5E78 calls it once per lock operation.
+//
+// r13 is used only when it is set, because the ThreadState path is the authoritative one if they ever
+// disagree; that is one compare on a path that is otherwise two loads.
+extern "C" REX_FUNC(__imp__KeGetCurrentProcessType) {
+  uint32_t direccion_pcr = ctx.r13.u32;
+  const memory::Memory* memoria = REX_KERNEL_MEMORY();
+  if (!direccion_pcr) {
+    direccion_pcr = static_cast<uint32_t>(XThread::GetCurrentThread()->thread_state()->context()->r13.u64);
+  }
+#if REX_PLATFORM_SWITCH
+  if (REXCVAR_GET(cod2_traducir_proceso_cacheado)) {
+    X_KPCR* pcr = TraducirProceso<X_KPCR>(memoria, direccion_pcr, g_traduccion_pcr);
+    ctx.r3.u64 = pcr->prcb_data.dpc_active
+                     ? pcr->processtype_value_in_dpc
+                     : TraducirProceso<X_KTHREAD>(memoria, pcr->prcb_data.current_thread,
+                                                  g_traduccion_hilo)
+                           ->process_type;
+    return;
+  }
+#endif
+  X_KPCR* pcr = memoria->TranslateVirtual<X_KPCR*>(direccion_pcr);
+  ctx.r3.u64 = pcr->prcb_data.dpc_active
+                   ? pcr->processtype_value_in_dpc
+                   : memoria->TranslateVirtual<X_KTHREAD*>(pcr->prcb_data.current_thread)
+                         ->process_type;
+}
+static rex::ppc::detail::PPCFuncRegistrar _ppc_reg___imp__KeGetCurrentProcessType(
+    "__imp__KeGetCurrentProcessType", &__imp__KeGetCurrentProcessType);
 
 void KeSetCurrentProcessType_entry(u32 type) {
   // One of X_PROCTYPE_?
@@ -1443,7 +1529,8 @@ REX_EXPORT(__imp__KeSetAffinityThread, rex::kernel::xboxkrnl::KeSetAffinityThrea
 REX_EXPORT(__imp__KeQueryBasePriorityThread, rex::kernel::xboxkrnl::KeQueryBasePriorityThread_entry)
 REX_EXPORT(__imp__KeSetBasePriorityThread, rex::kernel::xboxkrnl::KeSetBasePriorityThread_entry)
 REX_EXPORT(__imp__KeSetDisableBoostThread, rex::kernel::xboxkrnl::KeSetDisableBoostThread_entry)
-REX_EXPORT(__imp__KeGetCurrentProcessType, rex::kernel::xboxkrnl::KeGetCurrentProcessType_entry)
+// cod2 - the guest's KeGetCurrentProcessType is defined as a raw hook above (see the comment there), so it is
+// not exported through REX_EXPORT any more.
 REX_EXPORT(__imp__KeSetCurrentProcessType, rex::kernel::xboxkrnl::KeSetCurrentProcessType_entry)
 REX_EXPORT(__imp__KeQueryPerformanceFrequency,
            rex::kernel::xboxkrnl::KeQueryPerformanceFrequency_entry)
