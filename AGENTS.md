@@ -163,7 +163,6 @@ The two workstreams that are genuinely new for this game, and where they belong:
 ## 9. Ask before doing these
 
 - Committing or pushing.
-- Changing upstream ReXGlue code in `sdk/` that is not the port's Horizon layer.
 - Adding a dependency, a test framework or a build system.
 - Deleting anything under `docs/`, `tools/editions/` or `extras/`.
 - Re-enabling `huecos.toml`, restoring `pgo/`, or re-deriving addresses — these need this game's `default.xex` and a
