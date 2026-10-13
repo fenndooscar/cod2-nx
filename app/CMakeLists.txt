@@ -70,6 +70,10 @@ set(COD2_SOURCES
     src/cod2_nativo_texturas_pool.cpp
     # The packed shader library the two above read (shaders/cod2_empaquetar.cpp writes it).
     src/cod2_shader_library.cpp
+    # PNG captures of the image the presenter is about to show (cvar cod2_captura_cada_s). The only way to see
+    # what the port draws without photographing a screen: PrintWindow returns black for this swapchain and a
+    # desktop capture once returned another game's window. Works the same on the console.
+    src/cod2_nativo_captura.cpp
     # What the ring does not say about each draw, taken on the game thread: which shader each Direct3D draw
     # used, and the register-mirror snapshot the marker path compares against. Both of this game's hooks are
     # here - the shader constructor (sub_8209BD78) and the draw submission (sub_82368310, derived in

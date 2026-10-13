@@ -1,4 +1,4 @@
-﻿// cod2 - native renderer, steps C3, C4, C5c and C6 (see cod2_nativo_dibujos.h).
+// cod2 - native renderer, steps C3, C4, C5c and C6 (see cod2_nativo_dibujos.h).
 //
 // What it covers
 //   - Shaders: modules of the NFSSPV library with the XenosRecomp interface
@@ -515,6 +515,152 @@ REXCVAR_DEFINE_BOOL(cod2_nativo_prueba_depth_clamp, false, "COD2",
                     "Renderizador nativo (solo pruebas, 17/09 build 149): depthClampEnable en todos los pipelines. Imita "
                     "lo que parece hacer NVK en la consola con lo que queda detras del plano lejano (el sol de las "
                     "consultas de oclusion de la escena)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+/*
+ * Why this test exists.
+ *
+ * In the 13/10 PC run (logs/cod2_079.log) the pass statistics say, for every 20-second interval, the same
+ * thing: "escena 0.00 M fragmentos, 10 k vertices, 3 k primitivas; menores 0.70 M fragmentos, 49 k vertices,
+ * 23 k primitivas". The scene opens a 1280x1280 pass 14 times per frame, submits 256 draws and 100 k
+ * triangles, and the clipper lets 3 k primitives through, and then the fragment shader runs for zero
+ * fragments. The same frame's "menores" passes, which have no depth attachment at all, shade 0.70 M
+ * fragments. The one difference between the two groups of passes is the depth attachment.
+ *
+ * Two causes produce exactly that, and this flag separates them from everything else at once:
+ *   - the depth test rejects every fragment (clear value, depth range, or a stale buffer), or
+ *   - the depth attachment is never actually cleared and holds last frame's content.
+ * Both stop mattering the moment the test is off, so with the flag on the C2 line either goes to millions of
+ * fragments (the depth was the gate, and the next run decides which of the two) or stays at 0.00 M (the depth
+ * attachment is innocent and the geometry is being lost earlier).
+ *
+ * It changes what the game looks like on purpose - no depth means no occlusion, and geometry is drawn in
+ * submission order - so it is for measurement only. It reads the cvar when a pipeline is created, so it must
+ * be set at startup and not toggled while running.
+ */
+REXCVAR_DEFINE_BOOL(cod2_nativo_prueba_sin_z, false, "COD2",
+                    "Renderizador nativo (prueba, 13/10): apaga la prueba, la escritura y el estencil de profundidad "
+                    "en todos los pipelines. Sirve para saber si la profundidad es lo que deja la escena en 0.00 M "
+                    "fragmentos (el resto de pasadas, sin profundidad, sombrea 0.70 M). ROMPE LA IMAGEN: solo para medir")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+/*
+ * Why this test exists.
+ *
+ * Measured in the same run as the one above (logs/cod2_080.log): with the depth test off the scene still shades
+ * 0.00 M fragments, so the depth is not what is losing it. The per-draw diagnostic prints, for the draws of the
+ * scene pass, "sc 00018006": PA_SU_SC_MODE_CNTL with cull_back = 1 (bit 1) and face = 1 (bit 2), that is, back
+ * faces are culled and the front face is clockwise. Those are the two bits the port feeds straight into
+ * VkPipelineRasterizationStateCreateInfo (cullMode and frontFace), and the only way they can lose every fragment
+ * of every scene draw is that the pair is inverted with respect to what the rasterizer ends up seeing.
+ *
+ * It is the same decode the SDK uses for the emulated GPU (pipeline_cache.cpp: cull_front/cull_back/face), so it
+ * is not a made-up mapping - which is exactly why it has to be measured instead of argued: if the scene appears
+ * with the culling off, the decode is what is wrong, and the SDK has the same bug.
+ *
+ * The two directions are separate flags because they are not the same bug:
+ *   cod2_nativo_prueba_sin_cull    - no culling at all.
+ *   cod2_nativo_prueba_giro_inverso - keep the culling, swap which winding is the front face.
+ * Turning both on is the same as turning culling off. They change what the game looks like on purpose, so they
+ * are for measurement only, and they are read when a pipeline is created (set them at startup).
+ */
+REXCVAR_DEFINE_BOOL(cod2_nativo_prueba_sin_cull, false, "COD2",
+                    "Renderizador nativo (prueba, 13/10): cullMode = NONE en todos los pipelines. Los dibujos de la "
+                    "escena llegan con cull_back = 1 y face = 1 (sc 00018006); si con esto aparece la imagen, el "
+                    "descodificado del descarte de caras es lo que se pierde. ROMPE LA IMAGEN: solo para medir")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(cod2_nativo_prueba_giro_inverso, false, "COD2",
+                    "Renderizador nativo (prueba, 13/10): invierte frontFace (horario <-> antihorario) y deja el "
+                    "descarte de caras como esta. Separa 'el descarte de caras esta mal' de 'la cara frontal esta al "
+                    "reves'. ROMPE LA IMAGEN: solo para medir")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_BOOL(cod2_nativo_prueba_z_siempre, false, "COD2",
+                    "Renderizador nativo (prueba, 13/10): deja el adjunto de profundidad como esta pero pone "
+                    "depthCompareOp = ALWAYS en todos los pipelines. Medido: sin descarte de caras y con la prueba "
+                    "de profundidad puesta la escena sombrea 0.00 M fragmentos, y con las dos apagadas 5.31 M, asi "
+                    "que la prueba de profundidad es la que la pierde. Esto separa 'el contenido del bufer es "
+                    "malo' (con esto aparece la imagen) de 'el estado de profundidad esta mal'. ROMPE LA IMAGEN: "
+                    "solo para medir")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+/*
+ * Which end the depth buffer is stuck at.
+ *
+ * cod2_nativo_prueba_z_siempre and cod2_nativo_prueba_sin_z both bring the scene back (measured 13/10, in a
+ * mission: 3.96 M and 12.77 M fragments against 0.00 M), so the depth test's verdict is the gate and the
+ * geometry, the shaders and the output path are all fine. What is left is which side of the comparison is
+ * wrong: the buffer's content, or the z the vertex shader produces.
+ *
+ * The scene's RB_DEPTHCONTROL is 0x00700732 / 0x00700736: z_enable 1, z_write 0, zfunc 3 (LESS_OR_EQUAL).
+ * With z_write 0 nothing in the frame ever writes depth, so the buffer keeps whatever it started with, and
+ * the only thing the frame can compare against is that initial value. If that value is 0.0, LESS_OR_EQUAL
+ * rejects every fragment. GREATER says which one it is:
+ *   - GREATER brings the scene back  -> the buffer is at 0.0, so it is not the 1.0 the initialisation pass
+ *     was supposed to leave (cod2_nativo_profundidad_inicial, or the copy that overwrites it), and the
+ *     vertex shader's z is normal.
+ *   - GREATER leaves the scene black -> the buffer really is at the far end and the z coming out of the
+ *     vertex shader is what cannot compare (a NaN, or an out-of-range z the clipper is letting through).
+ * It breaks what the game looks like on purpose. Read when a pipeline is created: set it at startup.
+ */
+REXCVAR_DEFINE_BOOL(cod2_nativo_prueba_z_mayor, false, "COD2",
+                    "Renderizador nativo (prueba, 13/10): depthCompareOp = GREATER en todos los pipelines. Dice en "
+                    "que extremo esta atascado el bufer de profundidad: si con esto aparece la imagen, el bufer esta "
+                    "en 0.0 y no en el 1.0 que deja la inicializacion. ROMPE LA IMAGEN: solo para medir")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+/*
+ * The "far" initialisation of a depth image, and where it has to happen.
+ *
+ * THE FAILURE. The scene pass shades 0.00 M fragments per frame while the passes without a depth attachment
+ * shade 0.70 M, so the three-dimensional scene never reaches the screen and the 2D interface does. Forcing
+ * depthCompareOp = ALWAYS (cod2_nativo_prueba_z_siempre) brings the fragments and the image back, so the gate
+ * is the depth test's verdict and not the geometry, the shaders, the viewport or the output path.
+ *
+ * THE EVIDENCE. The guest never clears the scene's depth: in a whole run the only copy packet is the scene
+ * colour resolve (CONTROL 00100000, no clear bits) and the only depth clear is the shadow map's. The scene's
+ * draws carry RB_DEPTHCONTROL 00700732/00700736 (z_enable 1, zfunc 3 = LESS_OR_EQUAL), so against a buffer at
+ * 0.0 every fragment is rejected and a rejected fragment writes no depth either. On the console the depth
+ * buffer is persistent EDRAM and the frame converges from whatever the previous one left there.
+ *
+ * WHY THE CLEAR AT CREATION WAS NOT ENOUGH. The port already puts 1.0 into a depth image when it is created
+ * (cod2_nativo_destinos.cpp, Preparar) and the log confirmed it happened, and the scene stayed black. So the
+ * value has to be written on the pass, which is the only moment nothing can undo.
+ *
+ * WHY NOT EVERY FRAME. Measured too: with a clear per frame the scene comes out (10.46 M fragments, 255
+ * draws) but the image is wrong in a specific way - you see through walls and what is right in front of the
+ * camera is missing. The reason is in the draw trace: of the scene's draws only one in six carries z_write
+ * (00700736); the rest are 00700732 (test, no write) or 00700730 (no depth at all). Those do not build the
+ * depth, they consume it, and they are meant to consume what the previous frame left. Clearing every frame
+ * resets them to "far", every one of them passes the test, and the scene is painted in submission order
+ * instead of depth order.
+ *
+ * WHAT THIS DOES. Each depth image is cleared to "far" (1.0, stencil 0) once, on its first pass, and from then
+ * on it behaves like the persistent EDRAM the game expects. The shadow map is excluded: the game clears it
+ * itself and its second pass reads what the first one wrote.
+ */
+REXCVAR_DEFINE_BOOL(cod2_nativo_profundidad_inicial, true, "COD2",
+                    "Renderizador nativo (13/10): borra a 'lejos' (1.0, estencil 0) la profundidad de cada "
+                    "destino en su primer pase. El juego nunca borra la profundidad de la escena y una imagen "
+                    "nueva de Vulkan vale 0.0, el unico valor del que el fotograma no puede converger: zfunc 3 "
+                    "(LESS_OR_EQUAL) contra 0.0 rechaza todos los fragmentos y un fragmento rechazado tampoco "
+                    "escribe profundidad. Con false la escena se queda en negro");
+/*
+ * What the scene's depth buffer is worth, printed instead of deduced.
+ *
+ * Every measurement of the black scene so far has had to guess at it. With N > 0, once every 400 frames, the
+ * scene's depth image is copied to a host buffer and its distinct 32-bit words are counted, twice: right
+ * before a pass with that image opens, and again right after its draws have run. D24S8 puts the depth in the
+ * low 24 bits, so 0x00FFFFFF is depth 1.0 with stencil 0 (the "far" a clear leaves) and 0x00000000 is 0.0.
+ *
+ * It costs a GPU stall per dump, so it is a diagnostic and nothing else.
+ */
+REXCVAR_DEFINE_INT32(cod2_nativo_volcar_profundidad_s, 0, "COD2",
+                     "Renderizador nativo (diagnostico, 13/10): con N > 0, cada 400 fotogramas lee de vuelta la "
+                     "profundidad de la escena antes y despues de un pase y escribe en el registro cuantos "
+                     "texeles hay de cada valor de 32 bits. D24S8: 0x00FFFFFF es profundidad 1.0 y "
+                     "0x00000000 es 0.0. Cuesta un paron por volcado: solo para medir");
+REXCVAR_DEFINE_BOOL(cod2_nativo_profundidad_por_fotograma, false, "COD2",
+                    "Renderizador nativo (prueba, 13/10): borra la profundidad de la escena en CADA fotograma en "
+                    "vez de solo en el primer pase de la imagen. Quita la negrura absoluta (medido: 10.46 M "
+                    "fragmentos y 255 dibujos) pero deja mal el orden de profundidad, porque la mayoria de los "
+                    "dibujos de la escena llevan z_write = 0 y en la consola convergen sobre la profundidad que "
+                    "dejo el fotograma anterior: se ve a traves de las paredes. Solo para medir")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_INT32(cod2_nativo_resplandor_suave_alternar_s, 0, "COD2",
                      "Renderizador nativo (prueba, build 150): con N > 0 va rotando el resplandor del cielo original, "
@@ -2189,6 +2335,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
   }
 
   bool Dibujar(const PeticionDibujo& p) override {
+    ++peticiones_;
     VeredictoVegetacion(p);  // the ring's versus the game's (cod2_d3d_vegetacion_juego)
     // Stage stopwatch on 1 in kCronometroCada draws: reading the clock 12 times per draw took almost a
     // quarter of the ring thread's busy CPU on PC, and on the Switch each read costs more. The C6 averages
@@ -2197,7 +2344,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     auto marca = cronometrar_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const uint32_t* r = p.registros;
     if (!r || !p.vs) {
-      return false;
+      return Rechazar(300, "sin registros o sin vertex shader");
     }
     // --- Tipo de primitiva ---------------------------------------------------
     const uint32_t modo_edram = r[gr::XE_GPU_REG_RB_MODECONTROL] & 0x7;
@@ -2211,7 +2358,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     const EntradaShader* ps =  // can be removed if it writes no color and does not discard
         modo_edram == uint32_t(xenos::EdramMode::kColorDepth) ? p.ps : nullptr;
     if (!ps && modo_edram == uint32_t(xenos::EdramMode::kColorDepth)) {
-      return false;
+      return Rechazar(301, "destino de color sin pixel shader");
     }
     // Diagnostic: PS whose draws are skipped (cod2_nativo_diag_omitir_ps).
     const std::string& omitir = diag_omitir_ps_texto_;
@@ -2235,6 +2382,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
       }
     }
     if (ps && !omitir_ps_.empty() && omitir_ps_.count(ps->numero)) {
+      ++sin_pintar_;
       return true;
     }
     const uint32_t iniciador = r[gr::XE_GPU_REG_VGT_DRAW_INITIATOR];
@@ -2243,6 +2391,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     const bool indices32 = (iniciador >> 11) & 0x1;
     const uint32_t cuenta = iniciador >> 16;
     if (!cuenta) {
+      ++sin_pintar_;
       return true;
     }
     VkPrimitiveTopology topologia;
@@ -2288,7 +2437,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
 
     const EntradaVertices* entrada = EntradaDe(p);
     if (!entrada) {
-      return false;
+      return Rechazar(302, "sin entrada de vertices");
     }
     Etapa(0, marca);
     std::chrono::steady_clock::time_point t_indices_185 = marca;  // C6 subetapas 15-18
@@ -2312,6 +2461,15 @@ class DibujosVulkanImpl final : public DibujosVulkan {
       const uint32_t formato = (info >> 16) & 0xF;
       if (formato != uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8) &&
           formato != uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA)) {
+        // TEMPORARY (causa 214): who asks for an unsupported colour format, and for what.
+        if (formato_temporal_ != formato) {
+          formato_temporal_ = formato;
+          REXLOG_WARN("[nativo] C6 causa {}: destino {} direccion {:08X} pitch {} formato {} info {:08X} PS {} "
+                      "VS {} tipo {} cuenta {} mascara {:X} alto {:X}",
+                      200 + formato, i, info & 0xFFF, pitch, formato, info, ps ? int(ps->numero) : -1,
+                      p.vs ? int(p.vs->numero) : -1, tipo, cuenta, mascara,
+                      r[gr::XE_GPU_REG_RB_SURFACE_INFO] >> 16);
+        }
         return Rechazar(200 + formato, "formato de destino de color todavia no soportado");
       }
       claves[i] = (uint64_t(1) << 63) | (uint64_t(info & 0xFFF) << 24) | (uint64_t(formato) << 16) |
@@ -2368,6 +2526,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
             !alfa_nunca && ((((dc >> 1) & 0x1) && ((dc >> 2) & 0x1)) || (dc & 0x1));
         ++cuentas_z_[alfa_nunca ? kInvisibleAlfa : kInvisibleMezcla];
         if (!deja_rastro) {
+          ++sin_pintar_;
           return true;
         }
         ++cuentas_z_[kInvisibleSoloColor];  // drawn anyway: only counts what is left to gain
@@ -2444,6 +2603,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     }
     if (vegetacion_temprana) {
       ++dibujos_vegetacion_pronto_;
+      ++sin_pintar_;
       return true;
     }
     const uint32_t control_profundidad = r[gr::XE_GPU_REG_RB_DEPTHCONTROL];
@@ -2462,6 +2622,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
                     avisos_oclusion_dibujo_, p.vs->numero, ps ? int(ps->numero) : -1, tipo, cuenta, pitch,
                     mascara_registro, control_profundidad, modo_edram);
       }
+      ++sin_pintar_;
       return true;  // writes nothing visible
     }
     // FPS test cod2_nativo_omitir_sombras: the shadow map is depth-only and 1600 wide. With
@@ -2485,6 +2646,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
         }
       }
       if (omitir) {
+        ++sin_pintar_;
         return true;
       }
     }
@@ -2594,6 +2756,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
         }
       }
       if (vmin > vmax) {
+        ++sin_pintar_;
         return true;  // resets only
       }
       con_indices = true;
@@ -2894,7 +3057,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
                                         std::chrono::steady_clock::now() - antes_envio)
                                         .count());
       if (!enviado) {
-        return false;
+        return Rechazar(303, "el envio del bufer de subida fallo");
       }
     }
 
@@ -2941,7 +3104,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
             std::chrono::duration_cast<std::chrono::nanoseconds>(tras_pase - antes_pase).count());
       }
       if (!empezado) {
-        return false;
+        return Rechazar(304, "no se pudo empezar el pase");
       }
     }
     const VkCommandBuffer cmd = pase_comandos_;
@@ -2960,7 +3123,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     // --- Uploads: textures, vertices, indices and constants ------------------------------
     for (Textura* textura : texturas_a_subir_) {
       if (!SubirTextura(*textura)) {
-        return false;
+        return Rechazar(305, "no se pudo subir una textura");
       }
     }
     std::array<VkDeviceSize, 16> offsets_vertices{};
@@ -3096,6 +3259,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
       encuadre_valido_ = true;
     }
     if (encuadre_vacio != 0) {
+      ++sin_pintar_;
       return true;  // empty viewport or scissor: as before
     }
 
@@ -3191,6 +3355,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     if (solo_alfa && ps) {
       // If vegetation is excluded from the shadow map, this whole draw is unnecessary.
       if (sin_vegetacion_) {
+        ++sin_pintar_;
         return true;
       }
       especializacion |= kSpecSoloAlfa;
@@ -3274,7 +3439,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     // it.
     COD2_SUB(11, pipeline = PipelineDe(ClaveDeBusqueda(clave), *entrada, p));
     if (pipeline == VK_NULL_HANDLE) {
-      return false;
+      return Rechazar(306, "sin tuberia para esta clave");
     }
 #if REX_PLATFORM_SWITCH
     // The pipeline about to be bound, prefetched into the cache several us before its vkCmdBindPipeline
@@ -3507,7 +3672,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     if (eds_modo_ && !FijarEstadoDinamico(cmd, clave)) {
       COD2_SUB(11, pipeline = PipelineDe(ClaveDeBusqueda(clave), *entrada, p));
       if (pipeline == VK_NULL_HANDLE) {
-        return false;
+        return Rechazar(307, "sin tuberia para esta clave (estado dinamico)");
       }
       COD2_SUB(0, dfn_.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline));
       pipeline_enlazado_ = pipeline;
@@ -4741,6 +4906,14 @@ class DibujosVulkanImpl final : public DibujosVulkan {
           std::chrono::steady_clock::now() - antes_fin).count());
       const uint32_t categoria_cerrada = categoria_pase_;
       pase_activo_ = false;
+      // TEMPORARY (cod2_nativo_volcar_profundidad_s): the same depth image, now that this pass's draws have
+      // run. The question is which pass turns the buffer into 0.0.
+      if (imagen_del_volcado_) {
+        REXLOG_INFO("[nativo] C6 volcado: DESPUES del pase {} con {} dibujos dentro", pases_volcados_,
+                    dibujos_en_pase_);
+        contexto_->VolcarProfundidad(imagen_del_volcado_);
+        imagen_del_volcado_ = nullptr;
+      }
       // Just in case. A pending sky with the pass already closed cannot be recorded; it is counted so it
       // shows up in the report instead of disappearing silently.
       if (cielo_pendiente_) {
@@ -4783,6 +4956,8 @@ class DibujosVulkanImpl final : public DibujosVulkan {
   }
 
   void UsarRanura(uint32_t ranura) override {
+    volcado_activo_ = false;  // TEMPORARY (cod2_nativo_volcar_profundidad_s): one frame per dump
+    volcados_del_fotograma_ = 0;
     EsperarSubidas();  // already empty after AntesDeEnviar; just in case, before switching buffers
     InformeCopias();  // every 10 s, who made the vertex copies and how long the ring waited
     InformeCacheFetch();  // every 10 s, the per-fetch sampler table
@@ -5470,6 +5645,8 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     EstadisticasDibujos e;
     e.dibujados = dibujados_;
     e.rechazados = rechazados_;
+    e.peticiones = peticiones_;  // TEMPORARY
+    e.sin_pintar = sin_pintar_;  // TEMPORARY
     e.pipelines = pipelines_.size();
     e.texturas = texturas_.size();
     e.subidas_textura = subidas_textura_;
@@ -10046,7 +10223,81 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     contexto_->MarcarGpu(categoria_pase_);
     const bool sombras_sin_load =
         es_sombras && REXCVAR_GET(cod2_nativo_pase_sombras_sin_load);
-    const VkRenderPass pase = PaseDe(formatos, sombras_sin_load ? kCargaIgnorar : kCargaLeer);
+    /*
+     * THE BLACK SCENE: where the "far" initialisation of a depth image has to happen, and how often.
+     *
+     * THE FAILURE. The scene pass shades 0.00 M fragments per frame while the passes without a depth
+     * attachment shade 0.70 M, so the three-dimensional scene never reaches the screen and the 2D interface
+     * does. Forcing depthCompareOp = ALWAYS (cod2_nativo_prueba_z_siempre) brings the fragments and the image
+     * back, so the gate is the depth test's verdict and not the geometry, the shaders, the viewport or the
+     * output path.
+     *
+     * THE EVIDENCE. The guest never clears the scene's depth: in a whole run the only copy packet is the scene
+     * colour resolve (CONTROL 00100000, no clear bits) and the only depth clear is the shadow map's. The
+     * scene's draws carry RB_DEPTHCONTROL 00700732/00700736 (z_enable 1, zfunc 3 = LESS_OR_EQUAL), so against
+     * a buffer at 0.0 every fragment is rejected and a rejected fragment writes no depth either.
+     *
+     * WHY NOT WHEN THE IMAGE IS CREATED. cod2_nativo_profundidad_inicial used to put 1.0 into the image at
+     * creation and the log confirmed it happened, and the scene stayed black with the cvar on and off, with
+     * identical numbers. Something between creation and the first pass overwrites it (a restore through
+     * RestaurarContenido is the candidate). Clearing at the pass is the only moment that cannot be undone.
+     *
+     * WHY NOT EVERY FRAME. That was measured too: with a clear per frame the scene comes out (10.46 M
+     * fragments, 255 draws) but the image is wrong in a specific way - you see through walls and what is
+     * right in front of the camera is missing. The reason is in the same trace: of the scene's draws, only
+     * one in six carries z_write (00700736); the rest are 00700732 (test, no write) or 00700730 (no depth at
+     * all). Those draws do not build the depth, they consume it, and on the console they consume what the
+     * previous frame left in EDRAM. Clearing every frame resets them to "far", so every one of them passes
+     * the test and the scene is painted in submission order instead of depth order.
+     *
+     * WHAT THIS DOES. Each depth image is cleared to "far" (1.0, stencil 0) once, on its first pass, and from
+     * then on it behaves like the persistent EDRAM the game expects: the draws that write depth update it and
+     * the draws that only test converge on it over the following frames. The shadow map is excluded: it
+     * clears itself and its second pass reads what the first one wrote.
+     *
+     * OFF WITHOUT A REBUILD: cod2_nativo_profundidad_inicial = false.
+     */
+    // Once per image, on its first pass; and again on every frame with cod2_nativo_profundidad_por_fotograma
+    // (which is what makes the depth order wrong: see the comment above).
+    const bool primera_vez = imagenes[4] && profundidad_iniciada_.insert(imagenes[4]).second;
+    const bool por_fotograma = imagenes[4] && REXCVAR_GET(cod2_nativo_profundidad_por_fotograma) &&
+                               profundidad_borrada_en_[imagenes[4]] != fotograma_;
+    if (imagenes[4]) {
+      profundidad_borrada_en_[imagenes[4]] = fotograma_;
+    }
+    const bool borrar_profundidad =
+        imagenes[4] && !es_sombras &&
+        ((REXCVAR_GET(cod2_nativo_profundidad_inicial) && primera_vez) || por_fotograma);
+    // TEMPORARY (cod2_nativo_volcar_profundidad_s): the frame in which a depth image is initialised is dumped
+    // pass by pass, before and after each pass that has a depth attachment. That shows whether the clear
+    // takes effect and which pass then turns the buffer into 0.0.
+    if (!volcado_activo_ && REXCVAR_GET(cod2_nativo_volcar_profundidad_s) > 0 &&
+        (primera_vez || fotograma_ % 60 == 0)) {
+      volcado_activo_ = true;
+      REXLOG_INFO("[nativo] C6 volcado: fotograma {} (primera vez {}), volcado pase a pase", fotograma_,
+                  primera_vez ? 1 : 0);
+    }
+    if (volcado_activo_ && imagenes[4] && volcados_del_fotograma_ < 80) {
+      REXLOG_INFO("[nativo] C6 volcado: ANTES del pase {} (categoria {}, {}x{}, {} dibujos antes, borra prof {})",
+                  ++pases_volcados_, categoria_pase_, ancho, alto, dibujos_en_pase_,
+                  borrar_profundidad ? 1 : 0);
+      contexto_->VolcarProfundidad(imagenes[4]);
+      imagen_del_volcado_ = imagenes[4];
+      ++volcados_del_fotograma_;
+    } else {
+      imagen_del_volcado_ = nullptr;
+    }
+    // TEMPORARY (black scene): every time the depth is cleared at the pass, with the frame it happened in.
+    // Remove with the rest of the instrumentation.
+    if (borrar_profundidad && profundidad_borrados_pase_ < 40) {
+      ++profundidad_borrados_pase_;
+      REXLOG_INFO("[nativo] C6 profundidad borrada en el pase {}: fotograma {} {}x{} primera vez {} por fotograma {}",
+                  profundidad_borrados_pase_, fotograma_, ancho, alto, primera_vez ? 1 : 0,
+                  por_fotograma ? 1 : 0);
+    }
+    const VkRenderPass pase =
+        PaseDe(formatos, borrar_profundidad ? kCargaBorrar
+                                            : (sombras_sin_load ? kCargaIgnorar : kCargaLeer));
     if (pase == VK_NULL_HANDLE) {
       return Rechazar(42, "no se pudo crear el render pass");
     }
@@ -10077,6 +10328,18 @@ class DibujosVulkanImpl final : public DibujosVulkan {
       }
     }
     inicio.renderArea.extent = {ancho, alto_pase};
+    // TEMPORARY (black scene): the clear value of the depth attachment, at its own index among the
+    // attachments that are really used (the colour ones load, so theirs is never read).
+    VkClearValue valores_borrado[5] = {};
+    if (borrar_profundidad) {
+      uint32_t indice = 0;
+      for (uint32_t i = 0; i < 4; ++i) {
+        indice += formatos[i] ? 1 : 0;
+      }
+      valores_borrado[indice].depthStencil = {1.0f, 0};
+      inicio.clearValueCount = indice + 1;
+      inicio.pClearValues = valores_borrado;
+    }
     // cod2_nativo_diag_borrados. What this pass loads and stores of each render target, to compare with
     // what is cleared of it (C2 clears per target). Before opening the pass.
     for (const ImagenNativa* imagen : imagenes) {
@@ -10317,12 +10580,53 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     subpase.colorAttachmentCount = n_colores;
     subpase.pColorAttachments = colores.data();
     subpase.pDepthStencilAttachment = formatos[4] ? &profundidad : nullptr;
+    /*
+     * THE BLACK SCENE, and the reason a clear at creation was invisible.
+     *
+     * Every pass uses initialLayout = finalLayout = GENERAL, so Vulkan inserts no implicit dependency at all:
+     * a pass's stores are not made available to the next pass's loads unless the application says so, and this
+     * pass had no pDependencies. The frame opens the scene's depth image 14-15 times in a row with
+     * loadOp = LOAD, so every pass after the first read the depth without any ordering against the writes of
+     * the pass before it. On the console the depth is EDRAM and the passes of a frame simply see each other;
+     * here they did not, and what the load fetched was the image's initial content - 0.0 - against which zfunc
+     * 3 (LESS_OR_EQUAL) rejects every fragment, and a rejected fragment writes no depth either.
+     *
+     * That explains the whole set of measurements at once:
+     *   - with loadOp = CLEAR on every pass the scene appears (10.46 M fragments): a clear needs nothing from
+     *     the pass before it, so the missing dependency does not matter;
+     *   - clearing the image when it is created changes nothing at all: that clear is a pass of its own, and
+     *     its store was equally invisible to the next pass's load;
+     *   - the two are byte-for-byte reproducible, which a race would not be.
+     *
+     * The dependency below is the one the specification asks for between a depth write and a depth test, plus
+     * the colour equivalent. It costs nothing at run time: it describes an ordering the hardware already has
+     * inside a submission.
+     */
+    VkSubpassDependency dependencia{};
+    dependencia.srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependencia.dstSubpass = 0;
+    dependencia.srcStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                               VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
+                               VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                               VK_PIPELINE_STAGE_TRANSFER_BIT;
+    dependencia.dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                               VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
+                               VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependencia.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+                                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    dependencia.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+                                VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependencia.dependencyFlags = 0;
     VkRenderPassCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
     info.attachmentCount = n;
     info.pAttachments = adjuntos.data();
     info.subpassCount = 1;
     info.pSubpasses = &subpase;
+    info.dependencyCount = 1;
+    info.pDependencies = &dependencia;
     VkRenderPass pase;
     if (dfn_.vkCreateRenderPass(device_, &info, nullptr, &pase) != VK_SUCCESS) {
       return VK_NULL_HANDLE;
@@ -10668,6 +10972,15 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     // PA_SU_SC_MODE_CNTL.face: 1 = the front face is clockwise (not confirmed on screen).
     rasterizado.frontFace =
         (clave.rasterizado & 0x4) ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    // cod2_nativo_prueba_sin_cull / cod2_nativo_prueba_giro_inverso: see the comment next to the cvars.
+    if (REXCVAR_GET(cod2_nativo_prueba_sin_cull)) {
+      rasterizado.cullMode = VK_CULL_MODE_NONE;
+    }
+    if (REXCVAR_GET(cod2_nativo_prueba_giro_inverso)) {
+      rasterizado.frontFace = rasterizado.frontFace == VK_FRONT_FACE_CLOCKWISE
+                                  ? VK_FRONT_FACE_COUNTER_CLOCKWISE
+                                  : VK_FRONT_FACE_CLOCKWISE;
+    }
     rasterizado.lineWidth = 1.0f;
     rasterizado.depthBiasEnable = (clave.rasterizado & 0x10) ? VK_TRUE : VK_FALSE;
     rasterizado.depthClampEnable = REXCVAR_GET(cod2_nativo_prueba_depth_clamp) ? VK_TRUE : VK_FALSE;
@@ -10696,6 +11009,19 @@ class DibujosVulkanImpl final : public DibujosVulkan {
       } else {
         profundidad.back = profundidad.front;
       }
+    }
+    // cod2_nativo_prueba_sin_z / cod2_nativo_prueba_z_siempre. Applied here and not in the pipeline key, like
+    // cod2_nativo_prueba_depth_clamp: the cvar is read once per pipeline creation, so it has to be set at startup.
+    if (REXCVAR_GET(cod2_nativo_prueba_sin_z)) {
+      profundidad.depthTestEnable = VK_FALSE;
+      profundidad.depthWriteEnable = VK_FALSE;
+      profundidad.stencilTestEnable = VK_FALSE;
+    }
+    if (REXCVAR_GET(cod2_nativo_prueba_z_siempre)) {
+      profundidad.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+    }
+    if (REXCVAR_GET(cod2_nativo_prueba_z_mayor)) {
+      profundidad.depthCompareOp = VK_COMPARE_OP_GREATER;
     }
 
     static constexpr VkBlendFactor kFactores[32] = {
@@ -12125,6 +12451,18 @@ class DibujosVulkanImpl final : public DibujosVulkan {
   uint64_t bytes_muestra_ = 0;
   uint64_t bytes_ahorrados_muestra_ = 0;
   std::chrono::steady_clock::time_point informe_muestreo_{};
+  // cod2_nativo_profundidad_por_fotograma. The frame in which each depth image was last cleared to "far".
+  std::unordered_map<const void*, uint64_t> profundidad_borrada_en_;
+  // cod2_nativo_profundidad_inicial. The depth images already given their "far" at their first pass.
+  std::unordered_set<const void*> profundidad_iniciada_;
+  uint32_t profundidad_borrados_pase_ = 0;  // TEMPORARY (black scene)
+  // TEMPORARY (cod2_nativo_volcar_profundidad_s): the scene depth image to dump again when its pass closes,
+  // and whether this frame has already been dumped.
+  const ImagenNativa* imagen_del_volcado_ = nullptr;
+  uint64_t fotograma_volcado_ = UINT64_MAX;
+  bool volcado_activo_ = false;
+  uint32_t pases_volcados_ = 0;
+  uint32_t volcados_del_fotograma_ = 0;
   // Vertex copies on a separate thread (EncolarCopia). Power-of-2 capacity.
   const bool copias_activas_ = REXCVAR_GET(cod2_nativo_subidas_hilo);
   std::array<TrabajoCopia, 8192> copias_{};
@@ -12681,6 +13019,12 @@ class DibujosVulkanImpl final : public DibujosVulkan {
   std::unordered_set<uint64_t> diagnosticados_;
   uint64_t dibujados_ = 0;
   uint64_t dibujados_cronometrados_ = 0;  // of those, with the stage stopwatch
+  // TEMPORARY, to be removed once the count closes: every draw the ring offered, and every one accepted
+  // without painting anything. `dibujados + rechazados + sin_pintar` must equal `peticiones`, and
+  // `peticiones` must be the ring's own draw count - that is the arithmetic the report could not do, and
+  // without it "dibujados=14700" cannot be told apart from "the ring only offered five draws per frame".
+  uint64_t peticiones_ = 0;
+  uint64_t sin_pintar_ = 0;
   uint32_t cronometro_contador_ = 0;
   bool cronometrar_ = false;  // the current draw carries the stage stopwatch
   // Rear-view mirror diagnostic: cubemap refreshes from their resolved faces (report every 10 s).
@@ -12694,6 +13038,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
   std::array<uint64_t, kEtapasDibujo> etapas_ns_{};
   std::unordered_map<uint32_t, uint64_t> causas_;
   uint32_t ultima_causa_ = 0;
+  uint32_t formato_temporal_ = UINT32_MAX;  // TEMPORARY (causa 214)
   uint32_t entrada_causa_ = 0;  // cause of the failed vertex input
   uint64_t subidas_textura_ = 0;
   uint64_t megas_bytes_ = 0;

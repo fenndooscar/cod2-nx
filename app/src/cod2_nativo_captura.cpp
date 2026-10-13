@@ -1,8 +1,27 @@
-// cod2 - PNG captures of the game image (see cod2_nativo_captura.h).
+// cod2 - PNG captures of the game image, taken from inside the port.
 //
-// The PNG is written uncompressed (deflate "stored" blocks): the SDK does not
-// include stb_image_write and this is enough for testing. A 1280x720 capture
-// takes about 2.8 MB.
+// The failure this exists for
+//     The only way to know what the port is putting on the screen was to photograph the screen, and that lies
+//     twice over. Capturing this window with PrintWindow returns an all-black image for this swapchain, and
+//     capturing the desktop captures whichever window happens to be on top - which on this machine was once a
+//     *different* ReXGlue port, whose menu was then read as "cod2 paints a menu". Neither failure is visible in
+//     the PNG: both are just pixels.
+//
+// What this does instead
+//     Asks the presenter for the image it is about to show (Presenter::CaptureGuestOutput) and writes it as a
+//     PNG. It is the port's own idea of the frame, taken before the compositor, so no overlapping window and no
+//     window manager can be in the way - and it works the same on the console, where there is no screen to
+//     photograph at all. Two runs of the same build can be compared (native against emulated) without anybody
+//     looking at anything.
+//
+// How to turn it off without a rebuild
+//     --cod2_captura_cada_s=0 (the default, never). --cod2_captura_cada_s=5 writes one every 5 s to capturas/
+//     next to the executable, at most --cod2_captura_max (20 by default). The capture runs on its own thread, so
+//     it does not stall the ring; the presenter is asked for it on every capture because at startup it may not
+//     exist yet.
+//
+// The PNG is written uncompressed (deflate "stored" blocks): the SDK does not include stb_image_write and this
+// is enough for testing. A 1280x720 capture takes about 2.8 MB.
 
 #include "cod2_nativo_captura.h"
 
@@ -125,8 +144,7 @@ std::vector<uint8_t> CodificarPng(const rex::ui::RawImage& imagen) {
   return png;
 }
 
-void Bucle(std::function<rex::ui::Presenter*()> obtener_presentador, int cada_s, int maximo) {
-  const std::filesystem::path carpeta = rex::filesystem::GetExecutableFolder() / "capturas";
+void Bucle(std::function<rex::ui::Presenter*()> obtener_presentador, int cada_s, int maximo) {  const std::filesystem::path carpeta = rex::filesystem::GetExecutableFolder() / "capturas";
   const auto inicio = std::chrono::steady_clock::now();
   for (int n = 1; n <= maximo; ++n) {
     {

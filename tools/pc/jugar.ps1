@@ -105,15 +105,46 @@ Write-Output "registro: $(Join-Path $Destino 'logs')"
 
 if ($Partida) {
   $pulsar = Join-Path $PSScriptRoot 'pulsar.ps1'
-  Start-Sleep -Seconds 158  # the four intro movies, back to back
-  if ($p.HasExited) { throw 'el juego termino antes de llegar al menu' }
-  & $pulsar -Teclas RETURN -Cada 2 -Veces 3 | Select-Object -Last 1
-  Start-Sleep -Seconds 8
-  & $pulsar -Teclas SPACE -Cada 2 -Veces 4 | Select-Object -Last 1
-  Start-Sleep -Seconds 10
-  & $pulsar -Teclas SPACE -Cada 2 -Veces 4 | Select-Object -Last 1
-  Start-Sleep -Seconds 8
-  Write-Output 'en la partida; el proceso sigue vivo'
+  $logs = Join-Path $Destino 'logs'
+  # Whether the three-dimensional scene is being drawn, read from the renderer's own per-frame report.
+  # In the intro movies, the menu and the loading screens the scene target has a handful of draws or none;
+  # in a mission it has hundreds. The report is printed every ten seconds (the interval of the C reports),
+  # so it is only read after waiting longer than that.
+  function EnEscena {
+    $f = Get-ChildItem $logs -Filter 'cod2_*.log' -ErrorAction SilentlyContinue |
+         Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $f) { return $false }
+    $l = Select-String -Path $f.FullName -Pattern 'C6 area abierta por fotograma' | Select-Object -Last 1
+    if (-not $l) { return $false }
+    return ($l.Line -match 'escena [\d.]+ Mtexels en [\d.]+ pases \((\d+) dibujos' -and [int]$Matches[1] -ge 30)
+  }
+  # Why this is a loop and not a fixed wait. The intro movies do not play in real time in this build:
+  # legal.bik (150 frames at 29.97 fps, so 5 s of video) opens at 15.83 and atvi.bik (451 frames at
+  # 59.94, 7.5 s) opens at 17.57 - 1.7 s later, about three times too fast - but cod2_intro.bik is 3937
+  # frames and takes its full two minutes. A fixed 158 s wait therefore either measured the menu for its
+  # whole length or missed the mission. Now the scene is looked for in the log and the sequence is repeated
+  # until it appears.
+  #
+  # The sequence is deliberately only two keys. A longer one (adding a second RETURN and a second SPACE per
+  # round) walked into the attract-mode demo instead: the main menu's entries are reached by RETURN, and
+  # SPACE then confirms the next screen, so a third press lands on whatever is highlighted after the
+  # difficulty prompt and one of the entries there starts cod2_attract.bik.
+  Start-Sleep -Seconds 25
+  $en_escena = EnEscena
+  for ($intento = 1; $intento -le 16 -and -not $en_escena; $intento++) {
+    if ($p.HasExited) { throw 'el juego termino antes de llegar al menu' }
+    & $pulsar -Teclas RETURN -Cada 2 -Veces 2 | Select-Object -Last 1
+    Start-Sleep -Seconds 4
+    & $pulsar -Teclas SPACE -Cada 2 -Veces 3 | Select-Object -Last 1
+    Start-Sleep -Seconds 10
+    $en_escena = EnEscena
+    Write-Output "intento $intento de entrar en la partida: $(if ($en_escena) { 'dentro' } else { 'todavia no' })"
+  }
+  if ($en_escena) {
+    Write-Output 'en la partida; el proceso sigue vivo'
+  } else {
+    Write-Output 'NO se llego a la partida; el proceso sigue vivo'
+  }
 }
 
 if ($Esperar) {

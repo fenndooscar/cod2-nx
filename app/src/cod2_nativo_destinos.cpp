@@ -788,7 +788,10 @@ constexpr uint8_t kVisibilidadAgua = 0;
 constexpr uint8_t kVisibilidadTestigo = 1;
 // Passes measured per work unit. In a race there are ~16 per frame including the resumed ones.
 constexpr uint32_t kEstadisticasPorRanura = 64;
-constexpr uint32_t kContadoresEstadistica = 3;  // vertices, primitivas recortadas y fragmentos
+// The six counters of the pipeline-statistics query, in the order the driver returns them (ascending flag
+// value). They are read into CuentasPipeline by name, so this only has to match the flags requested.
+constexpr uint32_t kContadoresEstadistica = 6;
+constexpr uint32_t kContadorFragmentos = 5;
 // Draws measured in a diagnostic frame (the scene has ~1200).
 constexpr uint32_t kEstadisticasDibujoPorRanura = 2048;
 constexpr uint32_t kEtiquetasShader = 512;
@@ -1079,7 +1082,10 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
         info_estadisticas.queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS;
         info_estadisticas.queryCount = uint32_t(ranuras_.size() * kEstadisticasPorRanura);
         info_estadisticas.pipelineStatistics =
+            VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_VERTICES_BIT |
+            VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_PRIMITIVES_BIT |
             VK_QUERY_PIPELINE_STATISTIC_VERTEX_SHADER_INVOCATIONS_BIT |
+            VK_QUERY_PIPELINE_STATISTIC_CLIPPING_INVOCATIONS_BIT |
             VK_QUERY_PIPELINE_STATISTIC_CLIPPING_PRIMITIVES_BIT |
             VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT;
         if (dfn_.vkCreateQueryPool(device_, &info_estadisticas, nullptr, &estadisticas_) != VK_SUCCESS) {
@@ -1092,7 +1098,10 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
         info_dibujo.queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS;
         info_dibujo.queryCount = uint32_t(ranuras_.size() * kEstadisticasDibujoPorRanura);
         info_dibujo.pipelineStatistics =
+            VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_VERTICES_BIT |
+            VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_PRIMITIVES_BIT |
             VK_QUERY_PIPELINE_STATISTIC_VERTEX_SHADER_INVOCATIONS_BIT |
+            VK_QUERY_PIPELINE_STATISTIC_CLIPPING_INVOCATIONS_BIT |
             VK_QUERY_PIPELINE_STATISTIC_CLIPPING_PRIMITIVES_BIT |
             VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT;
         if (dfn_.vkCreateQueryPool(device_, &info_dibujo, nullptr, &estadisticas_dibujo_) != VK_SUCCESS) {
@@ -1395,6 +1404,23 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
     if (msaa != uint32_t(xenos::MsaaSamples::k1X) && avisados_.insert(1).second) {
       REXLOG_INFO("[nativo] C2: destino con MSAA: se usa con 1 muestra");
     }
+    // TEMPORARY (the black scene): every distinct kind of copy/clear packet the guest sends, with the exact
+    // registers that decide what it does. The scene's depth (base 530, pitch 1280) is never cleared by the
+    // port, and the scene pass shades 0.00 M fragments with a LESS_OR_EQUAL test while the passes without a
+    // depth attachment shade 0.70 M, which is what an uncleared depth stuck at 0.0 would produce. This says
+    // whether the request arrives at all, and with which bits. Remove with the rest of the instrumentation.
+    {
+      const uint64_t visto = (uint64_t(control) << 40) | (uint64_t(reg.rb_depth_info & 0xFFF) << 28) |
+                             (uint64_t(pitch) << 8) | uint64_t(reg.rb_copy_dest_info & 0x7F);
+      if (tipos_de_copia_vistos_.insert(visto).second && tipos_de_copia_vistos_.size() <= 32) {
+        REXLOG_INFO("[nativo] C6 tipo de copia: CONTROL {:08X} (origen {} borra color {} borra prof {} comando "
+                    "{}) DEPTH_INFO {:08X} (base {:03X}) COLOR0 {:08X} SUPERFICIE {:08X} (pitch {}) DEST_INFO "
+                    "{:08X} RB_DEPTH_CLEAR {:08X}",
+                    control, origen, (control >> 8) & 0x1, (control >> 9) & 0x1, (control >> 20) & 0x3,
+                    reg.rb_depth_info, reg.rb_depth_info & 0xFFF, reg.rb_color_info[0], reg.rb_surface_info,
+                    pitch, reg.rb_copy_dest_info, reg.rb_depth_clear);
+      }
+    }
     if (origen >= xenos::kMaxColorRenderTargets) {
       // From depth: the copy goes to a resolved texture with the host depth
       // format, which the draws sample as k_24_8. With a depth source no color
@@ -1626,6 +1652,21 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
   }
 
   void BorrarProfundidad(const RegistrosCopia& reg, uint32_t pitch) {
+    // TEMPORARY (the black scene): every distinct depth target the guest asks to clear, before any early
+    // return. The clear of the scene's depth (base 530, pitch 1280) has never been seen, and the scene pass
+    // shades 0.00 M fragments with a LESS_OR_EQUAL test while the passes without a depth attachment shade
+    // 0.70 M, so a depth that is never cleared and stays at 0.0 rejects the whole scene. This says whether the
+    // request arrives at all and whether the image is found. Remove with the rest of the instrumentation.
+    {
+      const uint64_t visto = (uint64_t(reg.rb_depth_info & 0xFFF) << 40) | (uint64_t(pitch) << 8) |
+                             (reg.rb_copy_control & 0x1FF);
+      if (profundidades_borradas_pedidas_.insert(visto).second &&
+          profundidades_borradas_pedidas_.size() <= 32) {
+        REXLOG_INFO("[nativo] C6 peticion de borrado de profundidad: DEPTH_INFO {:08X} (base {:03X}) pitch {} "
+                    "COPY_CONTROL {:08X} RB_DEPTH_CLEAR {:08X}",
+                    reg.rb_depth_info, reg.rb_depth_info & 0xFFF, pitch, reg.rb_copy_control, reg.rb_depth_clear);
+      }
+    }
     const uint32_t info = reg.rb_depth_info;
     Imagen* profundidad = ObtenerProfundidad(info & 0xFFF, (info >> 16) & 0x1, pitch);
     if (!profundidad || !Grabar()) {
@@ -1647,6 +1688,19 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
     }
     MarcarGpu(kGpuBorrados);  // clears, separate from copies (C2 report)
     ++borrados_profundidad_;
+    // TEMPORARY (the black scene): the value each depth is really cleared with, once per (base, pitch), so the
+    // depth test's verdict can be read from the log instead of guessed. A clear of 0.0 with a LESS_OR_EQUAL test
+    // rejects every fragment of the frame, which is exactly what the scene pass measures (0.00 M fragments while
+    // the depth-less passes shade 0.70 M). A depth that is never cleared here keeps whatever the allocation had.
+    // Remove with the rest of the instrumentation.
+    {
+      const uint64_t visto = (uint64_t(info & 0xFFF) << 32) | pitch;
+      if (profundidades_borradas_vistas_.insert(visto).second && profundidades_borradas_vistas_.size() <= 16) {
+        REXLOG_INFO("[nativo] C6 borrado de profundidad: base {:03X} pitch {} alto {}; RB_DEPTH_CLEAR {:08X} -> "
+                    "profundidad {:.9g}, estencil {}",
+                    info & 0xFFF, pitch, profundidad->alto, reg.rb_depth_clear, valor.depth, valor.stencil);
+      }
+    }
     // cod2_nativo_diag_borrados. Without TRANSFER_DST the clear is done by opening a pass (ZCULL).
     AnotarBorradoDiag(*profundidad, info & 0xFFF, (info >> 16) & 0x1, pitch, true,
                       !profundidad->admite_destino_de_copia);
@@ -2752,12 +2806,8 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
     nanosegundos = gpu_categorias_ns_;
   }
 
-  void EstadisticasPipeline(std::array<uint64_t, kGpuCategorias>& fragmentos,
-                            std::array<uint64_t, kGpuCategorias>& vertices,
-                            std::array<uint64_t, kGpuCategorias>& primitivas) const override {
-    fragmentos = fragmentos_categoria_;
-    vertices = vertices_categoria_;
-    primitivas = primitivas_categoria_;
+  void EstadisticasPipeline(std::array<CuentasPipeline, kGpuCategorias>& cuentas) const override {
+    cuentas = cuentas_categoria_;
   }
 
   void CopiasPorTamano(std::array<uint64_t, 4>& copias, std::array<uint64_t, 4>& pixeles) const override {
@@ -2969,6 +3019,91 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
     // Minimum with itself (the same texel): the pipeline with the bit already exists when applying starts.
     ++sm_lecturas_si_misma_;
     return &it->second.imagen;
+  }
+
+  // cod2_nativo_volcar_profundidad_s. Reads a depth image back and logs what is in it.
+  //
+  // Every measurement of the black scene so far has had to guess what the depth buffer is worth: the
+  // statistics say the fragment stage runs for zero fragments and the tests say which comparison brings them
+  // back, but not what the buffer holds. This prints it: the distinct 32-bit words and how many texels each
+  // one has. D24S8 puts the depth in the low 24 bits and the stencil in the high 8, so 0x00FFFFFF is depth
+  // 1.0 with stencil 0 (the "far" a clear leaves) and 0x00000000 is depth 0.0, the value no fragment can
+  // converge from.
+  void VolcarProfundidad(const ImagenNativa* imagen) override {
+    if (!imagen || imagen->imagen == VK_NULL_HANDLE || !imagen->ancho || !imagen->alto) {
+      return;
+    }
+    // Only the scene's depth: it is the one the black scene is about, and the smaller ones are dumped by
+    // their own size. Same cvar, one dump per image size.
+    if (imagen->ancho < 1000) {
+      return;
+    }
+    // The caller decides when: this is called twice per dump (before and after the pass), so it cannot have a
+    // throttle of its own.
+    if (dibujos_) {
+      dibujos_->TerminarPase();
+    }
+    const VkDeviceSize bytes = VkDeviceSize(imagen->ancho) * imagen->alto * 4;
+    Lectura lectura;
+    uint32_t tipo = 0;
+    if (!rex::ui::vulkan::util::CreateDedicatedAllocationBuffer(
+            dispositivo_, bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            rex::ui::vulkan::util::MemoryPurpose::kReadback, lectura.bufer, lectura.memoria, &tipo)) {
+      REXLOG_WARN("[nativo] C6 volcado de profundidad: no se pudo crear el bufer de lectura");
+      return;
+    }
+    void* mapeado = nullptr;
+    if (dfn_.vkMapMemory(device_, lectura.memoria, 0, VK_WHOLE_SIZE, 0, &mapeado) != VK_SUCCESS) {
+      DestruirLectura(lectura);
+      REXLOG_WARN("[nativo] C6 volcado de profundidad: no se pudo mapear el bufer");
+      return;
+    }
+    lectura.datos = static_cast<uint8_t*>(mapeado);
+    lectura.bytes = bytes;
+    VkBufferImageCopy copia{};
+    copia.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+    copia.imageExtent = {imagen->ancho, imagen->alto, 1};
+    dfn_.vkCmdCopyImageToBuffer(comandos_trabajo_, imagen->imagen, VK_IMAGE_LAYOUT_GENERAL,
+                                lectura.bufer, 1, &copia);
+    // The copy goes out with whatever is pending, and it is waited for: this is a diagnostic, not a frame.
+    EnviarTrabajo(false);
+    EsperarGpu();
+    const uint32_t* palabras = reinterpret_cast<const uint32_t*>(lectura.datos);
+    const size_t total = size_t(imagen->ancho) * imagen->alto;
+    std::unordered_map<uint32_t, uint64_t> cuenta;
+    uint32_t menor = UINT32_MAX, mayor = 0;
+    for (size_t i = 0; i < total; ++i) {
+      const uint32_t v = palabras[i];
+      if (++cuenta[v] == 1) {
+        menor = std::min(menor, v);
+        mayor = std::max(mayor, v);
+      }
+    }
+    std::vector<std::pair<uint64_t, uint32_t>> orden;
+    orden.reserve(cuenta.size());
+    for (const auto& [v, n] : cuenta) {
+      orden.emplace_back(n, v);
+    }
+    std::sort(orden.begin(), orden.end(), std::greater<>());
+    std::string lista;
+    for (size_t i = 0; i < orden.size() && i < 16; ++i) {
+      lista += fmt::format(" {:08X}x{};", orden[i].second, orden[i].first);
+    }
+    // A row across the middle of the image, every 128 texels: a depth gradient shows up here and a uniform
+    // buffer does not.
+    std::string fila;
+    const uint32_t* const media = palabras + size_t(imagen->alto / 2) * imagen->ancho;
+    for (uint32_t x = 0; x < imagen->ancho; x += 128) {
+      fila += fmt::format(" {:08X}", media[x]);
+    }
+    REXLOG_INFO("[nativo] C6 volcado de profundidad {}x{} (formato {}): {} valores distintos, menor {:08X} mayor "
+                "{:08X}; los mas frecuentes:{}; fila del medio:{}",
+                imagen->ancho, imagen->alto, uint32_t(imagen->formato), cuenta.size(), menor, mayor, lista, fila);
+    DestruirLectura(lectura);
+    // The diagnostic flushes the GPU, which is a frame-long stall. It is only for measurement.
+    if (volcados_profundidad_++ == 0) {
+      REXLOG_WARN("[nativo] C6: el volcado de profundidad cuesta un paron por volcado; es solo para medir");
+    }
   }
 
   // cod2_nativo_diag_borrados. What is known about the clears of a render target.
@@ -3863,6 +3998,7 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
     const uint64_t clave = (uint64_t(base) << 20) | (uint64_t(formato) << 16) | pitch;
     auto it = destinos_.find(clave);
     if (it != destinos_.end()) {
+      AnotarDestinoDiag(base, &it->second);
       return &it->second;
     }
     /*
@@ -3890,7 +4026,33 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
                 base, formato, pitch, alto, uint32_t(std::lround(diag.float32[0] * 255.0f)),
                 uint32_t(std::lround(diag.float32[1] * 255.0f)),
                 uint32_t(std::lround(diag.float32[2] * 255.0f)));
-    return &destinos_.emplace(clave, imagen).first->second;
+    Imagen& nueva = destinos_.emplace(clave, imagen).first->second;
+    AnotarDestinoDiag(base, &nueva);
+    return &nueva;
+  }
+
+  /*
+   * Diagnostic (cod2_nativo_diag_resueltas). Every colour render target drawn into this frame, so the mosaic
+   * can show them next to the resolved textures.
+   *
+   * Why it was needed: the mosaic only showed resolved textures, and the one the game actually fills with the
+   * scene (base 0x260, 1280x1280, format k_8_8_8_8) only reaches the mosaic through the resolve that copies it
+   * to 1DC9E000. With every 1280x720 cell black and only the 128x128 one carrying an image, it was impossible
+   * to tell whether the scene pass leaves its target black or whether the resolve is what loses it. This shows
+   * the target itself.
+   *
+   * destinos_ never erases, so the pointers stay valid until the Swap that composes the mosaic.
+   */
+  void AnotarDestinoDiag(uint32_t base, Imagen* imagen) {
+    if (!REXCVAR_GET(cod2_nativo_diag_resueltas) || destinos_fotograma_.size() >= 16) {
+      return;
+    }
+    for (const auto& [b, i] : destinos_fotograma_) {
+      if (i == imagen) {
+        return;
+      }
+    }
+    destinos_fotograma_.emplace_back(base, imagen);
   }
 
   Imagen* ObtenerProfundidad(uint32_t base, uint32_t formato, uint32_t pitch) {
@@ -3999,7 +4161,12 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
     imagen.admite_destino_de_copia = con_transfer_dst;
     REXLOG_INFO("[nativo] C2: destino de profundidad base {:03X}, formato {}, {}x{}", base,
                 formato, pitch, alto);
-    return &profundidades_.emplace(clave, imagen).first->second;
+    Imagen* nueva = &profundidades_.emplace(clave, imagen).first->second;
+    // A new depth image starts at "far" (1.0, stencil 0), which Preparar does. The value that matters is the
+    // one written on the image's FIRST PASS (cod2_nativo_profundidad_inicial, in DibujosVulkan::EmpezarPase):
+    // writing it here was measured to leave the scene black, because something between creation and the pass
+    // overwrites it. See the long comment on that cvar.
+    return nueva;
   }
 
   Resuelta* ObtenerResuelta(uint32_t base, uint32_t ancho, uint32_t alto, uint32_t formato,
@@ -4968,7 +5135,8 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
                         VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
       for (uint32_t i = 0; i < n; ++i) {
         const uint16_t etiqueta = ranura.estadisticas_dibujo[i].second;
-        fragmentos_por_shader_[etiqueta] += valores[i * kContadoresEstadistica + 2];
+        fragmentos_por_shader_[etiqueta] +=
+            valores[i * kContadoresEstadistica + kContadorFragmentos];
         ++dibujos_por_shader_[etiqueta];
       }
       // A diagnostic frame may span several submissions: the first one of each window counts.
@@ -4995,9 +5163,16 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
       for (uint32_t i = 0; i < n; ++i) {
         const uint8_t c = ranura.estadisticas[i].second;
         if (c < kGpuCategorias) {
-          vertices_categoria_[c] += valores[i * kContadoresEstadistica + 0];
-          primitivas_categoria_[c] += valores[i * kContadoresEstadistica + 1];
-          fragmentos_categoria_[c] += valores[i * kContadoresEstadistica + 2];
+          // Ascending flag value: input assembly vertices and primitives, vertex shader invocations, then the
+          // clipper's input and output, then the fragment invocations.
+          const uint64_t* v = &valores[i * kContadoresEstadistica];
+          CuentasPipeline& cuenta = cuentas_categoria_[c];
+          cuenta.vertices_montados += v[0];
+          cuenta.primitivas_montadas += v[1];
+          cuenta.vertices += v[2];
+          cuenta.recorte_dentro += v[3];
+          cuenta.recorte_fuera += v[4];
+          cuenta.fragmentos += v[5];
         }
       }
     }
@@ -5173,11 +5348,34 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
   }
 
   // Diagnostic (cod2_nativo_diag_resueltas): the frame's resolved textures in a 4x4 grid over
-  // 1280x720, in the order of their first copy. Cells without a texture stay dark purple.
+  // 1280x720, in the order of their first copy, followed by the frame's colour render targets. Cells
+  // without an image stay dark purple.
   bool ComponerMosaico(uint32_t base_swap) {
     std::vector<uint32_t> bases;
     bases.swap(resueltas_fotograma_);
-    if (bases.empty() || !blit_) {
+    std::vector<std::pair<uint32_t, Imagen*>> destinos;
+    destinos.swap(destinos_fotograma_);
+    std::vector<Imagen*> fichas;
+    std::string lista;
+    for (size_t i = 0; i < bases.size() && fichas.size() < 16; ++i) {
+      const auto it = resueltas_.find(bases[i]);
+      if (it == resueltas_.end() || !it->second.imagen.preparada ||
+          it->second.imagen.formato != kFormatoColor) {
+        continue;  // depth ones do not support blits to color
+      }
+      const Imagen& imagen = it->second.imagen;
+      lista += fmt::format(" {}{}:{:08X} {}x{}", fichas.size(), bases[i] == base_swap ? "*" : "", bases[i],
+                           imagen.ancho, imagen.alto);
+      fichas.push_back(const_cast<Imagen*>(&imagen));
+    }
+    for (const auto& [base, imagen] : destinos) {
+      if (!imagen || !imagen->preparada || imagen->formato != kFormatoColor || fichas.size() >= 16) {
+        continue;
+      }
+      lista += fmt::format(" {}destino {:03X} {}x{}", fichas.size(), base, imagen->ancho, imagen->alto);
+      fichas.push_back(imagen);
+    }
+    if (fichas.empty() || !blit_) {
       return false;
     }
     if (mosaico_.imagen == VK_NULL_HANDLE &&
@@ -5195,14 +5393,8 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
     const VkClearColorValue fondo{{0.12f, 0.0f, 0.12f, 1.0f}};
     dfn_.vkCmdClearColorImage(comandos_trabajo_, mosaico_.imagen, VK_IMAGE_LAYOUT_GENERAL, &fondo,
                               1, &kRangoColor);
-    std::string lista;
-    for (size_t i = 0; i < bases.size() && i < 16; ++i) {
-      const auto it = resueltas_.find(bases[i]);
-      if (it == resueltas_.end() || !it->second.imagen.preparada ||
-          it->second.imagen.formato != kFormatoColor) {
-        continue;  // depth ones do not support blits to color
-      }
-      const Imagen& imagen = it->second.imagen;
+    for (size_t i = 0; i < fichas.size(); ++i) {
+      const Imagen& imagen = *fichas[i];
       const int32_t x = int32_t(i % 4) * 320;
       const int32_t y = int32_t(i / 4) * 180;
       VkImageBlit copia{};
@@ -5213,14 +5405,11 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
       copia.dstOffsets[1] = {x + 318, y + 178, 1};
       blit_(comandos_trabajo_, imagen.imagen, VK_IMAGE_LAYOUT_GENERAL, mosaico_.imagen,
             VK_IMAGE_LAYOUT_GENERAL, 1, &copia, VK_FILTER_LINEAR);
-      lista += fmt::format(" {}{}:{:08X} {}x{}", i, bases[i] == base_swap ? "*" : "", bases[i],
-                           imagen.ancho, imagen.alto);
     }
     const auto ahora = std::chrono::steady_clock::now();
     if (ahora - ultimo_aviso_mosaico_ >= std::chrono::seconds(10)) {
       ultimo_aviso_mosaico_ = ahora;
-      REXLOG_INFO("[nativo] diag resueltas: {} en el fotograma (* = la del Swap):{}", bases.size(),
-                  lista);
+      REXLOG_INFO("[nativo] diag resueltas: {} en el fotograma (* = la del Swap):{}", fichas.size(), lista);
     }
     return true;
   }
@@ -5787,9 +5976,7 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
   VkQueryPool oclusiones_ = VK_NULL_HANDLE;
   // Pipeline statistics per pass category.
   VkQueryPool estadisticas_ = VK_NULL_HANDLE;
-  std::array<uint64_t, kGpuCategorias> fragmentos_categoria_{};
-  std::array<uint64_t, kGpuCategorias> vertices_categoria_{};
-  std::array<uint64_t, kGpuCategorias> primitivas_categoria_{};
+  std::array<CuentasPipeline, kGpuCategorias> cuentas_categoria_{};
   uint64_t estadisticas_sin_sitio_ = 0;
   VkQueryPool estadisticas_dibujo_ = VK_NULL_HANDLE;
   std::vector<uint64_t> fragmentos_por_shader_;
@@ -5838,6 +6025,7 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
   uint32_t escala_sombras_ = 0;
   uint64_t sombras_subidas_ = 0;
   std::vector<uint32_t> resueltas_fotograma_;
+  std::vector<std::pair<uint32_t, Imagen*>> destinos_fotograma_;  // cod2_nativo_diag_resueltas
   Imagen mosaico_;
   std::chrono::steady_clock::time_point ultimo_aviso_mosaico_{};
   // Read-back of small resolved textures (cod2_nativo_leer_resueltas_texels).
@@ -5983,6 +6171,9 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
   size_t siguiente_framebuffer_ = 0;
 
   std::chrono::steady_clock::time_point inicio_alternancia_ = std::chrono::steady_clock::now();
+  bool volcado_profundidad_hecho_ = false;  // TEMPORARY (cod2_nativo_volcar_profundidad_s)
+  std::chrono::steady_clock::time_point ultimo_volcado_{};  // TEMPORARY
+  uint32_t volcados_profundidad_ = 0;  // TEMPORARY
   bool alternancia_anotada_ = false;
   uint64_t intercambios_ = 0;    // resolves without a copy
   uint64_t restauraciones_ = 0;
@@ -6130,6 +6321,12 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
   uint64_t copias_ = 0;
   uint64_t copias_profundidad_ = 0;  // those that force keeping the depth tile
   uint64_t borrados_profundidad_ = 0;  // depth clears (borrados_ only counts color ones)
+  // TEMPORARY: (base << 32) | pitch of every depth that has been cleared at least once. Remove with the rest.
+  std::unordered_set<uint64_t> profundidades_borradas_vistas_;
+  // TEMPORARY: (base, pitch, copy control) of every depth clear the guest asks for. Remove with the rest.
+  std::unordered_set<uint64_t> profundidades_borradas_pedidas_;
+  // TEMPORARY: every distinct kind of copy/clear packet seen. Remove with the rest.
+  std::unordered_set<uint64_t> tipos_de_copia_vistos_;
   uint64_t borrados_en_pase_fallidos_ = 0;  // clears through a pass that could not be opened
   uint64_t borrados_ = 0;
   uint64_t presentados_ = 0;

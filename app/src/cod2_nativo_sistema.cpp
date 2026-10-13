@@ -32,6 +32,7 @@
 #include "cod2_nativo_sistema.h"
 
 #include "cod2_esperas_tiron.h"
+#include "cod2_nativo_captura.h"
 #include "cod2_nativo_destinos.h"
 #include "cod2_nativo_ganchos.h"
 #include "cod2_nativo_shaders.h"
@@ -736,6 +737,9 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
       return X_STATUS_UNSUCCESSFUL;
     }
     REXLOG_INFO("[nativo] Sistema grafico nativo (C1): presentador del SDK, sin emulacion del Xenos");
+    // cod2_captura_cada_s: PNGs of the image the presenter is about to show (see cod2_nativo_captura.cpp).
+    // Off unless the cvar asks for it; here because this is where the presenter first exists.
+    cod2::captura::Arrancar([this]() { return presenter_.get(); });
     return X_STATUS_SUCCESS;
   }
 
@@ -800,6 +804,7 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
   }
 
   void Shutdown() override {
+    cod2::captura::Parar();  // before the presenter goes away
     ActivarGanchos(nullptr);  // the game hooks stop touching the library
     ActivarConsumidorMarcadores(false);  // FlushState goes back to the game's own path
     if (activo_.exchange(false)) {
@@ -1150,6 +1155,27 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
       AnotarRampaGamma(indice, valor);
     }
     registros_[indice] = valor;
+    // TEMPORARY (the black scene). Every distinct value the guest writes to RB_DEPTH_CLEAR, with the depth
+    // target, the copy control and the EDRAM mode in force at that moment. The port only ever clears a depth
+    // through RB_COPY_CONTROL's depth_clear_enable bit (bit 9), and that bit has only ever been seen set for
+    // the shadow map (base 010, pitch 160); the scene's depth (base 530, pitch 1280) is never cleared, so it
+    // keeps whatever the allocation had, and a LESS_OR_EQUAL test against 0.0 rejects the whole scene while
+    // the passes without a depth attachment (the HUD and the menus) shade normally. This says where the guest
+    // really asks for the scene depth to be cleared. Remove with the rest of the instrumentation.
+    if (indice == rex::graphics::XE_GPU_REG_RB_DEPTH_CLEAR) {
+      const uint64_t clave = (uint64_t(valor) << 32) ^
+                             (uint64_t(registros_[rex::graphics::XE_GPU_REG_RB_DEPTH_INFO]) << 8) ^
+                             uint64_t(registros_[rex::graphics::XE_GPU_REG_RB_COPY_CONTROL]);
+      if (profundidades_borradas_registradas_.insert(clave).second &&
+          profundidades_borradas_registradas_.size() <= 32) {
+        REXLOG_INFO("[nativo] C6 escritura de RB_DEPTH_CLEAR {:08X}; DEPTH_INFO {:08X} COPY_CONTROL {:08X} "
+                    "MODECONTROL {:08X} SUPERFICIE {:08X}",
+                    valor, registros_[rex::graphics::XE_GPU_REG_RB_DEPTH_INFO],
+                    registros_[rex::graphics::XE_GPU_REG_RB_COPY_CONTROL],
+                    registros_[rex::graphics::XE_GPU_REG_RB_MODECONTROL],
+                    registros_[rex::graphics::XE_GPU_REG_RB_SURFACE_INFO]);
+      }
+    }
     if (indice >= rex::graphics::XE_GPU_REG_SCRATCH_REG0 &&
         indice <= rex::graphics::XE_GPU_REG_SCRATCH_REG7) {
       const uint32_t n = indice - rex::graphics::XE_GPU_REG_SCRATCH_REG0;
@@ -2161,7 +2187,10 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
           // the PS object at 0 in some of the race shadow draws.
           if (vs_dibujo_ &&
               (ps_dibujo_ || (Registro(rex::graphics::XE_GPU_REG_RB_MODECONTROL) & 0x7) == 5)) {
+            ++dibujos_con_shaders_;  // TEMPORARY: closes the count against the renderer's own
             DibujarNativo();
+          } else {
+            ++dibujos_sin_shaders_;  // TEMPORARY
           }
         }
         break;
@@ -3993,29 +4022,40 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
       // Actual fragments and vertices of each pass, to separate per-pixel cost from geometry cost.
       // The counts do not depend on the machine: what is measured on the PC holds for the console.
       {
-        std::array<uint64_t, kGpuCategorias> frag{}, vert{}, prim{};
-        destinos_->EstadisticasPipeline(frag, vert, prim);
+        std::array<CuentasPipeline, kGpuCategorias> cuentas{};
+        destinos_->EstadisticasPipeline(cuentas);
         static constexpr const char* kTiposEstad[] = {"resto",  "sombras", "escena",  "reflejo",
                                                       "cubo",   "menores", "copias",  "borrados",
                                                       "escena sin profundidad", "hueco"};
         std::string linea;
         for (uint32_t c = 0; presentados_intervalo && c < kGpuCategorias; ++c) {
-          const uint64_t f = frag[c] - fragmentos_categoria_previos_[c];
-          const uint64_t v = vert[c] - vertices_categoria_previos_[c];
-          const uint64_t p = prim[c] - primitivas_categoria_previas_[c];
+          const CuentasPipeline& ahora = cuentas[c];
+          const CuentasPipeline& antes = cuentas_categoria_previas_[c];
+          const auto dif = [](uint64_t a, uint64_t b) { return a - b; };
+          const uint64_t v = dif(ahora.vertices, antes.vertices);
+          const uint64_t ia_v = dif(ahora.vertices_montados, antes.vertices_montados);
+          const uint64_t ia_p = dif(ahora.primitivas_montadas, antes.primitivas_montadas);
+          const uint64_t dentro = dif(ahora.recorte_dentro, antes.recorte_dentro);
+          const uint64_t fuera = dif(ahora.recorte_fuera, antes.recorte_fuera);
+          const uint64_t f = dif(ahora.fragmentos, antes.fragmentos);
           if (f || v) {
-            linea += fmt::format(" {} {:.2f} M fragmentos, {:.0f} k vertices, {:.0f} k primitivas;",
-                                 kTiposEstad[c], double(f) / 1e6 / double(presentados_intervalo),
-                                 double(v) / 1e3 / double(presentados_intervalo),
-                                 double(p) / 1e3 / double(presentados_intervalo));
+            // The chain, so that the number that stops making sense says where the geometry is lost: the index
+            // buffer is assembled (montados), the vertex shader runs (VS), the clipper lets some through
+            // (recorte dentro -> fuera), and the fragment stage shades what is left. 345 k vertices are needed
+            // for the scene's 115 k triangles per frame and only 10 k vertex shader invocations happen, so the
+            // chain is what tells whether the draws are smaller than they look or the vertices never arrive.
+            const double por = double(presentados_intervalo);
+            linea += fmt::format(
+                " {} {:.2f} M fragmentos, {:.0f} k VS de {:.0f} k vertices montados ({:.0f} k primitivas), "
+                "recorte {:.0f} k -> {:.0f} k;",
+                kTiposEstad[c], double(f) / 1e6 / por, double(v) / 1e3 / por, double(ia_v) / 1e3 / por,
+                double(ia_p) / 1e3 / por, double(dentro) / 1e3 / por, double(fuera) / 1e3 / por);
           }
         }
         if (!linea.empty()) {
           COD2_INFORME_SEGUN(diferir_informe, "[nativo] C2 por fotograma y tipo de pasada:{}", linea);
         }
-        fragmentos_categoria_previos_ = frag;
-        vertices_categoria_previos_ = vert;
-        primitivas_categoria_previas_ = prim;
+        cuentas_categoria_previas_ = cuentas;
       }
       // Which pixel shaders fill the screen, from the diagnostic frames
       // (cod2_nativo_estadisticas_por_dibujo_s). Accumulated from the start, not per interval.
@@ -4413,6 +4453,11 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
                   "causa:{}",
                   d.dibujados, d.rechazados, d.pipelines, d.ms_pipelines, d.texturas,
                   d.megas_texturas, d.subidas_textura, d.megas_subidos, causas);
+      // TEMPORARY: closes the count. The ring's own "dibujos=" must equal `peticiones`, and
+      // dibujados + rechazados + sin_pintar must equal it too. Remove once the gap is explained.
+      COD2_INFORME_SEGUN(diferir_informe, "[nativo] C6 cuenta de dibujos (temporal): peticiones={} dibujados={} "
+                  "rechazados={} sin pintar={}",
+                  d.peticiones, d.dibujados, d.rechazados, d.sin_pintar);
     }
     if (shaders_.cargada()) {
       const EstadisticasShaders e = shaders_.Estadisticas();
@@ -4498,6 +4543,12 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
                   dibujos_incoherentes_, dibujos_por_im_load_, variantes_vistas_.size(),
                   variantes_longitud_distinta_, elementos_sin_fetch_,
                   g.llamadas_dibujo, g.dibujo_sin_dispositivo);
+      // TEMPORARY: what the ring did with every DRAW_INDX it saw. Cumulative, so it can be put next to
+      // the ring's own "dibujos=" and "copias=". The three arms must add up to the ring's draw count.
+      COD2_INFORME_SEGUN(diferir_informe, "[nativo] C5b cuenta del anillo (temporal): dibujos={} copias={} con "
+                  "shaders={} sin shaders={} (de ellos sin registro={})",
+                  dibujos_.load(std::memory_order_relaxed), copias_.load(std::memory_order_relaxed),
+                  dibujos_con_shaders_, dibujos_sin_shaders_, dibujos_sin_registro_);
     }
     if (!histograma_anotado_ && swaps_.load() >= 60) {
       histograma_anotado_ = true;
@@ -4845,9 +4896,7 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
   uint64_t gpu_trabajos_previos_ = 0;
   uint64_t presentados_previos_gpu_ = 0;
   std::array<uint64_t, kGpuCategorias> gpu_categorias_previas_{};
-  std::array<uint64_t, kGpuCategorias> fragmentos_categoria_previos_{};
-  std::array<uint64_t, kGpuCategorias> vertices_categoria_previos_{};
-  std::array<uint64_t, kGpuCategorias> primitivas_categoria_previas_{};
+  std::array<CuentasPipeline, kGpuCategorias> cuentas_categoria_previas_{};
   uint64_t fotogramas_diagnostico_previos_ = 0;
   std::array<uint64_t, 4> copias_cubeta_previas_{};
   std::array<uint64_t, 4> pixeles_cubeta_previos_{};
@@ -4863,6 +4912,8 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
   Reloj::time_point inicio_sistema_{};
   bool trazando_ = false;
   bool traza_hecha_ = false;
+  // TEMPORARY: distinct (value, depth target, copy control) written to RB_DEPTH_CLEAR. Remove with the rest.
+  std::unordered_set<uint64_t> profundidades_borradas_registradas_;
   // cod2_nativo_diag_constantes_ps is not empty. Refreshed on every Swap.
   bool diag_constantes_activo_ = false;
   std::unordered_set<uint32_t> texturas_volcadas_;  // cod2_nativo_diag_vertices_ps
@@ -4875,6 +4926,10 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
   uint64_t huella_vs_ = 0;
   uint64_t huella_vs_generacion_ = UINT64_MAX;
   uint64_t dibujos_por_im_load_ = 0;
+  // TEMPORARY (see the report that prints them): cumulative, so the ring's own draw count and the two
+  // arms of the DRAW_INDX handler can be put side by side.
+  uint64_t dibujos_con_shaders_ = 0;
+  uint64_t dibujos_sin_shaders_ = 0;
 
   // Vulkan objects for the test image: only the ring thread touches them.
   VkRenderPass render_pass_ = VK_NULL_HANDLE;

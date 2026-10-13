@@ -234,10 +234,20 @@ cod2_recomp.15.cpp:25888   r3 = lwz 12(r4)      ; the shader object
 cod2_recomp.15.cpp:25890   bl sub_82098B10      ; SetVertexShader -> device + 0x4FD8
 ```
 
-**confirmed.** Because `sub_82368C40` is called one instruction-block before `sub_82368310` in the same loop
-iteration (`cod2_recomp.56.cpp:26127` then `:26134`), the values at `device + 0x3290` and `device + 0x4FD8` when
-the hook runs are exactly the pair bound for that draw. Reading the device slots is therefore sufficient; no second
-hook is required.
+**confirmed, with one correction.** Because `sub_82368C40` is called one instruction-block before `sub_82368310` in
+the same loop iteration (`cod2_recomp.56.cpp:26127` then `:26134`), the values at `device + 0x3290` and
+`device + 0x4FD8` when the hook runs are exactly the pair bound for that draw. Reading the device slots is
+therefore sufficient *as far as the binding goes*.
+
+**The correction: "no second hook is required" is wrong for the pixel stage.**
+`docs/pixel-shaders-cod2.md` traces it. The device slot holds the right object, but the port can only turn that
+object into a library entry if it saw the object being created, and it only hooks the vertex constructor:
+`sub_8209BD78` is the worker behind the game's own `dx.device->CreateVertexShader( mtlShader->program, &shader->vs )`
+and the pixel stage goes through a separate `sub_8209B9D0`, behind `CreatePixelShader`. A run with only the vertex
+hook created 61 shaders, every one of them a vertex one, and every draw record came out with `ps = 0`. Both
+constructors are now hooked. Also: `sub_82098A88` is *not* what writes `device + 0x3290` — it calls
+`sub_8209BB00` (`cod2_recomp.0.cpp:463-464`), the only writer of that slot in the image, and two of its three
+callers pass 0 to unbind.
 
 *Upgrade path, if the device slots ever prove unreliable:* hook `sub_82368C40` as well and remember the pair it
 binds at `:25881-25892`, then read the remembered pair in the draw hook. This costs a second hook and buys nothing

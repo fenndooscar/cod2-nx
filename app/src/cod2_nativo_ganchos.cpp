@@ -1019,15 +1019,22 @@ EstadisticasGanchos EstadisticasDeGanchos() {
  * link error at best and, with the addresses declared in overrides.toml, a strong symbol for a function
  * this game never calls at worst.
  *
- * 1. SHADER CREATION - done. CoD2 has ONE constructor where the fork had two, and it does not need to be
- *    told the stage: the container says it. See the comment on the hook.
+ * 1. SHADER CREATION - done, and it is TWO functions, not one. The first version of this hook claimed CoD2
+ *    has a single constructor that reads the stage off the container, because sub_8209BD78's own body accepts
+ *    either signature (`clrlwi r11,r11,25` and the 52-or-592 branch, cod2_recomp.36.cpp:384-400). Its body
+ *    does - but the game only ever calls it with a vertex container, and the run proved it: 61 shaders
+ *    created, all 61 with signature 102A0E01, and PS=0 (conocidos 0). The pixel constructor is a separate
+ *    function, sub_8209B9D0, and the game's own source-line strings say so: sub_82384180 branches on a stage
+ *    byte and its two arms log `CreateVertexShader( mtlShader->program, &shader->vs )` (guest 0x82051438,
+ *    cod2_recomp.7.cpp:27115-27117) and `CreatePixelShader( mtlShader->program, &shader->ps )` (guest
+ *    0x82051480, cod2_recomp.7.cpp:27159-27161). Both are hooked now. docs/pixel-shaders-cod2.md is the
+ *    derivation.
  *
- * 2. THE DRAW ENTRY - done. CoD2's Direct3D front end is shaped differently from the fork's four Draw*
- *    entry points, and what it has instead is a single submission, sub_82368310, whose argument struct is
- *    the record. The mapping is in the comment on that hook, and docs/gancho-dibujos-cod2.md is the
- *    specification with the citations. This is the half the ring cannot get any other way: by the time a
- *    patched vertex shader reaches the ring its microcode is not the container's, so without a record the
- *    ring can only reuse a pairing it has already seen (UsarIdentidadDelAnillo, cod2_nativo_sistema.cpp:3355).
+ * 2. THE DRAW ENTRY - done, at the two ring writers rather than at sub_82368310. See the comment on those
+ *    hooks and docs/gancho-dibujos-cod2.md, whose recommendation a run disproved. This is the half the ring
+ *    cannot get any other way: by the time a patched vertex shader reaches the ring its microcode is not the
+ *    container's, so without a record the ring can only reuse a pairing it has already seen
+ *    (UsarIdentidadDelAnillo, cod2_nativo_sistema.cpp:3355).
  *
  * 3. THE REGISTER MARKER - the optimisation, not a requirement, and the only part of the fork's design still
  *    absent. The fork replaced its FlushState's ~7 register packets with one compound marker the ring
@@ -1038,50 +1045,81 @@ EstadisticasGanchos EstadisticasDeGanchos() {
  *
  * 4. THE VEGETATION FILTER - present as a mechanism, not yet wired to this game's arguments. The fork skipped
  *    the shadow-map draws the ring would discard, on the game thread, before they were ever submitted
- *    (DecidirVegetacion). Its criteria read the count out of the fork's r6/r7, and this game's draw passes a
- *    struct instead, so the hook records no verdict (vegetacion = 0, which the ring reads as "none") and the
- *    filter is inert. Re-deriving it against the struct in the draw hook is what turns it back on.
+ *    (DecidirVegetacion). Its criteria read the count out of the fork's r6/r7, and the draws now come from
+ *    the ring writers' r4..r7, so the hook records no verdict (vegetacion = 0, which the ring reads as
+ *    "none") and the filter is inert. Re-deriving it against those arguments is what turns it back on.
  */
 
 /*
- * sub_8209BD78 is Call of Duty 2's shader constructor: r3 is the shader container on entry and the created
- * shader object on return. One function for both stages, where the fork had two.
+ * sub_8209BD78 (vertex) and sub_8209B9D0 (pixel) are Call of Duty 2's two shader constructors: r3 is the
+ * shader container on entry and the created shader object on return. The fork also had two, and these are
+ * their counterparts.
  *
- * WHY ONE AND NOT TWO, AND WHY THE STAGE IS READ FROM THE CONTAINER
- *   The fork's two constructors differed only in which signature they expected. CoD2's branches on it
- *   itself: `lwz r11,0(r31)` then `clrlwi r11,r11,25` (cod2_recomp.36.cpp:384-388) masks the container's
- *   first word to 7 bits and picks 52 for a pixel shader against 592 for a vertex one - and 592 is exactly
- *   the offset the fork's container layout uses for the vertex program. So the low bit of the signature at
- *   +0 (0x102A0E00 pixel / 0x102A0E01 vertex) is the stage, and reading it here is the same answer the
- *   constructor itself reaches.
+ * WHY TWO, WHEN THE VERTEX ONE'S BODY ACCEPTS EITHER SIGNATURE
+ *   sub_8209BD78 masks the container's first word to 7 bits and picks 52 for a pixel program against 592 for
+ *   a vertex one (cod2_recomp.36.cpp:384-400); sub_8209B9D0 does exactly the same arithmetic
+ *   (cod2_recomp.22.cpp:420-437) and differs only in the object layout - the vertex one copies the container
+ *   to object+592 and zeroes 592 bytes, the pixel one zeroes 13 words and copies to object+52. So the bodies
+ *   are twins and the *use* is what separates them: the game calls sub_8209BD78 only with a vertex container
+ *   and sub_8209B9D0 only with a pixel one. Measured: with only the vertex hook, 61 shaders were created and
+ *   every one had signature 102A0E01.
+ *
+ *   The stage is therefore not read off the container here - it is a property of which function ran, and the
+ *   signature check below is only a guard that the right one was hooked.
  *
  * WHAT IT IS FOR
  *   Nothing else identifies a shader reliably. By the time a vertex shader reaches the ring, Direct3D has
  *   reordered its fetches, applied the vertex declaration's swizzles and nulled the outputs the pixel
  *   shader does not read, so the microcode the ring sees is not the microcode in the container. The map
- *   built here - object -> library entry - is what the ring looks that microcode up in.
+ *   built here - object -> library entry - is what the ring looks that microcode up in. The pixel shader is
+ *   what the draw record needs for its `ps` field, without which no draw can be drawn natively at all.
  *
  * WHY THE OBJECT IS READ AFTER THE CALL AND NOT BEFORE
- *   The constructor allocates it (sub_822E12E8) and returns it in r3 (cod2_recomp.36.cpp:488). Before the
- *   call, r3 is the container, which is not what a later SetVertexShader will store in the device.
+ *   The constructor allocates it (sub_822E12E8) and returns it in r3 (cod2_recomp.36.cpp:488,
+ *   cod2_recomp.22.cpp:453-456). Before the call, r3 is the container, which is not what a later
+ *   SetVertexShader will store in the device.
  *
  * COST
- *   Three call sites in the whole program, so three times per shader the game ever creates. The hook reads
- *   one word, calls the original and takes a lock once; it changes no PPC register.
+ *   Three call sites for the vertex one and four for the pixel one (cod2_recomp.5.cpp:22, .7.cpp:27117,
+ *   .10.cpp:35417; .7.cpp:22, .7.cpp:27161, .10.cpp:35256, .10.cpp:35341), so at most seven times per shader
+ *   the game ever creates. Each hook reads one word, calls the original and takes a lock once; neither
+ *   changes a PPC register.
  *
  * VERIFIED
- *   The offsets, the single-constructor claim and the three call sites were read out of CoD2's generated
- *   code and are cited above. NOT verified: that it runs. Nothing here has been on the console yet, so
- *   what the log will say is a prediction, not a measurement - the counters it feeds are the ones
- *   cod2_nativo_sistema.cpp already reports ("shader creado ... que no esta en la biblioteca").
+ *   The offsets, the two-constructor split and the call sites were read out of CoD2's generated code and are
+ *   cited above; the 61-vertex-shaders-and-no-pixel measurement is from a real run on a PC. NOT verified:
+ *   anything on the console, and that the pixel hook now finds the pixel shaders in the library - the C5b
+ *   counters ("PS=", "conocidos") are what will say, and they have not been re-run with this hook in.
  */
+namespace {
+
+// Both constructors have the same shape and differ only in the stage, which is a property of which function
+// ran. The stage is still read off the container's signature rather than hard-coded per hook: it is the same
+// answer either way, and if a hook ever ends up on the wrong function the log's counters say so instead of
+// filing the shaders under the wrong half of the library.
+bool EsContenedorDeVertices(const uint8_t* base, uint32_t contenedor) {
+  return contenedor != 0 && cod2::nativo::LeerBE(base + contenedor) == 0x102A0E01u;
+}
+
+}  // namespace
+
 REX_EXTERN(__imp__sub_8209BD78);
 REX_HOOK_RAW(sub_8209BD78) {
   namespace detalle = cod2::nativo::ganchos_detalle;
   const uint32_t contenedor = ctx.r3.u32;
-  const bool vertices = contenedor != 0 && cod2::nativo::LeerBE(base + contenedor) == 0x102A0E01u;
+  const bool vertices = EsContenedorDeVertices(base, contenedor);
   const auto* entrada = detalle::IdentificarCreacion(base, contenedor, vertices);
   __imp__sub_8209BD78(ctx, base);
+  detalle::RecordarCreacion(ctx.r3.u32, entrada, vertices);
+}
+
+REX_EXTERN(__imp__sub_8209B9D0);
+REX_HOOK_RAW(sub_8209B9D0) {
+  namespace detalle = cod2::nativo::ganchos_detalle;
+  const uint32_t contenedor = ctx.r3.u32;
+  const bool vertices = EsContenedorDeVertices(base, contenedor);
+  const auto* entrada = detalle::IdentificarCreacion(base, contenedor, vertices);
+  __imp__sub_8209B9D0(ctx, base);
   detalle::RecordarCreacion(ctx.r3.u32, entrada, vertices);
 }
 
@@ -1142,15 +1180,6 @@ namespace {
 void AnotarEscrituraDeAnillo(const uint8_t* base, uint32_t primitivas, uint32_t primer_vertice,
                             uint32_t vertices_o_indice, uint32_t cuenta,
                             cod2::nativo::FuncionDibujo funcion) {
-  // TEMPORARY: the first few calls are logged whatever the guards say, because "the hook never ran" and "the
-  // hook ran and found no device" are the two possibilities and the counters alone cannot tell them apart.
-  static std::atomic<uint32_t> primeras{0};
-  if (primeras.fetch_add(1, std::memory_order_relaxed) < 4) {
-    REXLOG_INFO("[nativo] gancho de anillo: funcion {} primitivas {} primerVertice {} verticeOIndice {} "
-                "cuenta {} dispositivo {:08X}",
-                int(funcion), primitivas, primer_vertice, vertices_o_indice, cuenta,
-                cod2::nativo::LeerBE(base + 0x83630E60u));
-  }
   const uint32_t dispositivo = cod2::nativo::LeerBE(base + 0x83630E60u);
   cod2::nativo::ContarLlamadaDibujo(dispositivo != 0);
   if (!dispositivo) {

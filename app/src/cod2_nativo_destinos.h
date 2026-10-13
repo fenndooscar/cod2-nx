@@ -27,6 +27,19 @@ class VulkanDevice;
 
 namespace cod2::nativo {
 
+// Pipeline-statistics counters of one pass category, in the order the driver returns them (ascending flag
+// value). They are a chain: the geometry is assembled from the index and vertex buffers, the vertex shader
+// runs, the clipper lets some primitives through, and the fragment stage shades what is left. Comparing two
+// consecutive numbers says where the geometry is being lost, which is what the per-pass report needs.
+struct CuentasPipeline {
+  uint64_t vertices_montados = 0;     // VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_VERTICES_BIT
+  uint64_t primitivas_montadas = 0;   // ..._INPUT_ASSEMBLY_PRIMITIVES_BIT
+  uint64_t vertices = 0;              // ..._VERTEX_SHADER_INVOCATIONS_BIT
+  uint64_t recorte_dentro = 0;        // ..._CLIPPING_INVOCATIONS_BIT
+  uint64_t recorte_fuera = 0;         // ..._CLIPPING_PRIMITIVES_BIT
+  uint64_t fragmentos = 0;            // ..._FRAGMENT_SHADER_INVOCATIONS_BIT
+};
+
 // Registers a copy needs, taken from the ring sink's register mirror.
 struct RegistrosCopia {
   uint32_t rb_surface_info = 0;
@@ -115,11 +128,10 @@ class DestinosNativos {
   // GPU nanoseconds accumulated per category (kGpuOtros..., cod2_nativo_dibujos.h).
   virtual void TiempoGpuPorCategoria(
       std::array<uint64_t, kGpuCategorias>& nanosegundos) const = 0;
-  // Shaded fragments, vertex invocations and clipped primitives, accumulated per pass category (only
-  // with cod2_nativo_estadisticas_pipeline).
-  virtual void EstadisticasPipeline(std::array<uint64_t, kGpuCategorias>& fragmentos,
-                                    std::array<uint64_t, kGpuCategorias>& vertices,
-                                    std::array<uint64_t, kGpuCategorias>& primitivas) const = 0;
+  // Geometry and fragment counters accumulated per pass category (only with
+  // cod2_nativo_estadisticas_pipeline). See CuentasPipeline.
+  virtual void EstadisticasPipeline(
+      std::array<CuentasPipeline, kGpuCategorias>& cuentas) const = 0;
   // Fragments and draws per pixel shader number (0 = no PS), accumulated over the diagnostic frames, and
   // how many of those frames there have been.
   // Image copies and megapixels per size bucket (<=64x64, <=320x320, <=1024x1024, larger), accumulated.

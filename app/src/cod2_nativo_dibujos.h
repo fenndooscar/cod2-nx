@@ -109,6 +109,10 @@ class ContextoDestinos {
     (void)ancho;
     (void)alto;
   }
+  // cod2_nativo_volcar_profundidad_s. Copies a depth image to a host buffer, waits for the GPU and logs
+  // what is in it. Answers "what is the depth buffer worth right now" with data instead of deduction, which
+  // is the one question every measurement so far has had to guess at. Called right before a pass opens.
+  virtual void VolcarProfundidad(const ImagenNativa* imagen) { (void)imagen; }
   // cod2_nativo_sombra_minimo (see cod2_nativo_destinos.cpp). When a pass opens: true if it is the
   // shadow map car pass that C2 is observing or applying, and then each draw is validated with
   // DibujoDeCochesSombra. `solo_profundidad`: the pass has no color targets.
@@ -196,6 +200,10 @@ struct PeticionDibujo {
 struct EstadisticasDibujos {
   uint64_t dibujados = 0;
   uint64_t rechazados = 0;
+  // TEMPORARY (see cod2_nativo_dibujos.cpp): the draws the ring offered, and those accepted without
+  // painting. dibujados + rechazados + sin_pintar == peticiones.
+  uint64_t peticiones = 0;
+  uint64_t sin_pintar = 0;
   uint64_t pipelines = 0;
   uint64_t texturas = 0;
   uint64_t subidas_textura = 0;
