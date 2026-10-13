@@ -605,6 +605,22 @@ REXCVAR_DEFINE_BOOL(cod2_nativo_prueba_z_mayor, false, "COD2",
                     "en 0.0 y no en el 1.0 que deja la inicializacion. ROMPE LA IMAGEN: solo para medir")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 /*
+ * The probe that separates "the comparison is wrong" from "the z is not a number".
+ *
+ * Measured, in a mission, with the depth buffer at 1.0 before the pass: LESS_OR_EQUAL shades 0.00 M fragments,
+ * GREATER also 0.00 M, and ALWAYS 3.96 M. A comparison that fails both ways is what NaN does: NaN fails every
+ * ordered comparison and only ALWAYS lets it through. Written into a UNORM24 depth buffer it stores as 0.0,
+ * which is exactly the value the depth dump finds over the render area.
+ *
+ * NOT_EQUAL is the discriminator: NaN != anything is TRUE, so if the scene appears with this flag and not with
+ * LESS_OR_EQUAL or GREATER, the z coming out of the vertex shader is NaN and the depth buffer is innocent.
+ */
+REXCVAR_DEFINE_BOOL(cod2_nativo_prueba_z_no_igual, false, "COD2",
+                    "Renderizador nativo (prueba, 13/10): depthCompareOp = NOT_EQUAL en todos los pipelines. NaN no "
+                    "pasa ninguna comparacion ordenada pero si esta, asi que si con esto aparece la escena el z que "
+                    "sale del vertex shader es NaN. ROMPE LA IMAGEN: solo para medir")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+/*
  * The "far" initialisation of a depth image, and where it has to happen.
  *
  * THE FAILURE. The scene pass shades 0.00 M fragments per frame while the passes without a depth attachment
@@ -650,6 +666,35 @@ REXCVAR_DEFINE_BOOL(cod2_nativo_profundidad_inicial, true, "COD2",
  *
  * It costs a GPU stall per dump, so it is a diagnostic and nothing else.
  */
+/*
+ * The draw that fills the scene's depth buffer with 0.0.
+ *
+ * Measured, in a mission, with the depth image at 1.0 right before the frame's first scene pass (the port
+ * initialises it) and the whole 1280x720 render area at 0.0 right after: that pass contains 2 draws, and
+ * exactly one draw in the entire frame writes depth into the scene target. It is always the same one, and its
+ * geometry is a full-screen quad: 6 vertices, 6 indices, viewport exactly 1280x720, RB_DEPTHCONTROL 00700732
+ * shape with z_write set, colour mask F.
+ *
+ * Why this flag exists rather than a fix. NaN was the first guess and it is wrong: a NaN z would fail
+ * LESS_OR_EQUAL against the 1.0 the buffer holds, the quad would have been rejected, and the buffer would
+ * have stayed at 1.0. It became 0.0, so the quad's z is a finite 0.0 (or below), which is normal for a
+ * screen-space quad whose vertices are 2D. What is not normal is that a quad with z_write = 1 is drawn into
+ * the scene's depth target at all.
+ *
+ * With this on, only that draw's depth write is dropped (z_write = 0) and everything else stays exactly as it
+ * is, including the game's own LESS_OR_EQUAL. It answers one question: is the 3D scene's own z fine and the
+ * quad the only thing in the way?
+ *   - the scene appears  -> the quad was the blocker; the 3D z is usable and the depth problem is about who
+ *     writes the depth buffer, not about what the depth test compares against;
+ *   - still 0.00 M       -> the 3D scene's own z cannot pass the game's test, and the search goes back to the
+ *     shaders and the geometry.
+ */
+REXCVAR_DEFINE_BOOL(cod2_nativo_sin_z_quad_escena, false, "COD2",
+                    "Renderizador nativo (prueba, 13/10): quita la escritura de profundidad al unico dibujo que "
+                    "la escribe en el destino de la escena (un quad de pantalla completa, VS n353/PS n620, 6 "
+                    "vertices) y deja todo lo demas igual. Si con esto aparece la escena, ese quad es lo que deja "
+                    "el bufer en 0.0 y rechaza todo lo demas. ROMPE LA IMAGEN: solo para medir")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_INT32(cod2_nativo_volcar_profundidad_s, 0, "COD2",
                      "Renderizador nativo (diagnostico, 13/10): con N > 0, cada 400 fotogramas lee de vuelta la "
                      "profundidad de la escena antes y despues de un pase y escribe en el registro cuantos "
@@ -2470,6 +2515,27 @@ class DibujosVulkanImpl final : public DibujosVulkan {
                       p.vs ? int(p.vs->numero) : -1, tipo, cuenta, mascara,
                       r[gr::XE_GPU_REG_RB_SURFACE_INFO] >> 16);
         }
+        /*
+         * TEMPORARY (black scene). How many depth writes are being thrown away with these draws.
+         *
+         * The scene's draws are 1 in 6 with z_write, and the instrumentation over the ACCEPTED draws found
+         * only one draw per frame that writes depth - the full-screen quad. If the rest are here, rejected
+         * for their colour format, then the port is dropping the game's own depth writes (a Z-prepass writing
+         * linear depth into an R32F target at the same EDRAM base as the colour, with the real depth at 0x530)
+         * and that, not the depth test, is what leaves the buffer at 0.0.
+         */
+        const uint32_t control_rechazado = r[gr::XE_GPU_REG_RB_DEPTHCONTROL];
+        const uint64_t clave_rechazo = (uint64_t(control_rechazado) << 32) |
+                                       (uint64_t((r[gr::XE_GPU_REG_RB_DEPTH_INFO] & 0xFFF)) << 8) |
+                                       uint64_t(formato);
+        if (rechazos_con_profundidad_.insert(clave_rechazo).second && rechazos_con_profundidad_.size() <= 24) {
+          REXLOG_INFO("[nativo] C6 rechazo con profundidad {}: DEPTHCONTROL {:08X} (prueba {} escribe {} funcion "
+                      "{}) DEPTH_INFO {:08X} base {:03X} formato color {} VS n{} PS n{} tipo {} cuenta {} pitch {}",
+                      rechazos_con_profundidad_.size(), control_rechazado, (control_rechazado >> 1) & 0x1,
+                      (control_rechazado >> 2) & 0x1, (control_rechazado >> 4) & 0x7,
+                      r[gr::XE_GPU_REG_RB_DEPTH_INFO], r[gr::XE_GPU_REG_RB_DEPTH_INFO] & 0xFFF, formato,
+                      p.vs ? int(p.vs->numero) : -1, ps ? int(ps->numero) : -1, tipo, cuenta, pitch);
+        }
         return Rechazar(200 + formato, "formato de destino de color todavia no soportado");
       }
       claves[i] = (uint64_t(1) << 63) | (uint64_t(info & 0xFFF) << 24) | (uint64_t(formato) << 16) |
@@ -3376,6 +3442,19 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     if (ps && claves[4] && mascaras) {
       const bool prueba_z = ((control_profundidad >> 1) & 0x1) != 0;
       const bool escribe_z = prueba_z && ((control_profundidad >> 2) & 0x1) != 0;
+      // TEMPORARY (black scene). The scene's depth buffer ends up at 0.0 over exactly the 1280x720 render
+      // area, and no clear of the port does it. This prints every draw that writes depth in a pass of 1280
+      // pixels or more, with its geometry: whoever covers the whole area with a z of 0.0 is the one.
+      if (escribe_z && pitch >= 1280 && dibujos_z_volcados_ < 60) {
+        ++dibujos_z_volcados_;
+        REXLOG_INFO("[nativo] C6 dibujo que escribe Z: VS n{} PS n{} tipo {} cuenta {} indices {} viewport "
+                    "{:.1f},{:.1f} {:.1f}x{:.1f} z {:.3f}-{:.3f} funcion {} mascara {:X} en el pase {} del "
+                    "fotograma {}",
+                    p.vs ? int(p.vs->numero) : -1, ps ? int(ps->numero) : -1, tipo, cuenta, con_indices ? 1 : 0,
+                    viewport.x, viewport.y, viewport.width, viewport.height, viewport.minDepth, viewport.maxDepth,
+                    (control_profundidad >> 4) & 0x7, r[gr::XE_GPU_REG_RB_COLOR_MASK], dibujos_en_pase_,
+                    fotograma_);
+      }
       const bool estencil = (control_profundidad & 0x1) != 0;
       const bool ps_escribe_z = (ps->salidas & 0x10) != 0;
       const bool tardio = (especializacion & 0x2) || ps->descarta || ps_escribe_z;
@@ -3427,7 +3506,16 @@ class DibujosVulkanImpl final : public DibujosVulkan {
       }
     }
     clave.mascaras = mascaras;
-    clave.profundidad = claves[4] ? control_profundidad : 0;
+    // cod2_nativo_sin_z_quad_escena. See the cvar: this one draw, once per frame, writes depth 0.0 over the
+    // whole 1280x720 render area of the scene target, and from then on the game's own LESS_OR_EQUAL rejects
+    // every later fragment. Dropping only its depth write separates "the quad is the only thing in the way"
+    // from "the 3D scene's own z is unusable".
+    uint32_t control_profundidad_clave = control_profundidad;
+    if (sin_z_quad_escena_ && p.vs->numero == kQuadEscenaVs && ps && ps->numero == kQuadEscenaPs) {
+      control_profundidad_clave &= ~UINT32_C(0x4);  // z_write = 0
+      ++quad_escena_sin_z_;
+    }
+    clave.profundidad = claves[4] ? control_profundidad_clave : 0;
     if (clave.profundidad && oclusion_abierta_ && pitch >= 640 && !mascaras &&
         REXCVAR_GET(cod2_nativo_prueba_oclusion_siempre)) {
       clave.profundidad |= 0x7 << 4;  // test: Z function always
@@ -4956,7 +5044,6 @@ class DibujosVulkanImpl final : public DibujosVulkan {
   }
 
   void UsarRanura(uint32_t ranura) override {
-    volcado_activo_ = false;  // TEMPORARY (cod2_nativo_volcar_profundidad_s): one frame per dump
     volcados_del_fotograma_ = 0;
     EsperarSubidas();  // already empty after AntesDeEnviar; just in case, before switching buffers
     InformeCopias();  // every 10 s, who made the vertex copies and how long the ring waited
@@ -5496,6 +5583,13 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     if (comandos == VK_NULL_HANDLE || imagen.vista == VK_NULL_HANDLE || !imagen.ancho ||
         !imagen.alto) {
       return false;
+    }
+    // TEMPORARY (black scene): every pass-clear of a depth image, with its size and value. The dump finds
+    // exactly 1280x720 texels at 0.0 inside a 1280x1280 image, so whoever does it uses that rectangle, and
+    // this is the only clear in the port that goes through a render pass.
+    if (imagen.ancho >= 1000 && avisos_borrado_profundidad_ < 24) {
+      REXLOG_INFO("[nativo] C6 borrado de profundidad en pase {}: {}x{} a {:.6g}/{} en el fotograma {}",
+                  ++avisos_borrado_profundidad_, imagen.ancho, imagen.alto, profundidad, stencil, fotograma_);
     }
     TerminarPase();  // a pass cannot be opened inside another
     uint32_t formatos[5] = {0, 0, 0, 0, uint32_t(imagen.formato)};
@@ -10268,18 +10362,18 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     const bool borrar_profundidad =
         imagenes[4] && !es_sombras &&
         ((REXCVAR_GET(cod2_nativo_profundidad_inicial) && primera_vez) || por_fotograma);
-    // TEMPORARY (cod2_nativo_volcar_profundidad_s): the frame in which a depth image is initialised is dumped
-    // pass by pass, before and after each pass that has a depth attachment. That shows whether the clear
-    // takes effect and which pass then turns the buffer into 0.0.
-    if (!volcado_activo_ && REXCVAR_GET(cod2_nativo_volcar_profundidad_s) > 0 &&
-        (primera_vez || fotograma_ % 60 == 0)) {
-      volcado_activo_ = true;
-      REXLOG_INFO("[nativo] C6 volcado: fotograma {} (primera vez {}), volcado pase a pase", fotograma_,
-                  primera_vez ? 1 : 0);
+    // TEMPORARY (cod2_nativo_volcar_profundidad_s): the frame in which a depth image is initialised and the
+    // two after it are dumped pass by pass, before and after every pass with a depth attachment. If nothing
+    // else writes the image, the frame that turns it into 0.0 has to be one of those three.
+    if (primera_vez) {
+      fotograma_volcado_ = fotograma_;
     }
-    if (volcado_activo_ && imagenes[4] && volcados_del_fotograma_ < 80) {
-      REXLOG_INFO("[nativo] C6 volcado: ANTES del pase {} (categoria {}, {}x{}, {} dibujos antes, borra prof {})",
-                  ++pases_volcados_, categoria_pase_, ancho, alto, dibujos_en_pase_,
+    const bool volcado_activo = REXCVAR_GET(cod2_nativo_volcar_profundidad_s) > 0 &&
+                                fotograma_ >= fotograma_volcado_ && fotograma_ <= fotograma_volcado_ + 2;
+    if (volcado_activo && imagenes[4] && volcados_del_fotograma_ < 200) {
+      REXLOG_INFO("[nativo] C6 volcado: fotograma {} ANTES del pase {} (categoria {}, {}x{}, {} dibujos antes, "
+                  "borra prof {})",
+                  fotograma_, ++pases_volcados_, categoria_pase_, ancho, alto, dibujos_en_pase_,
                   borrar_profundidad ? 1 : 0);
       contexto_->VolcarProfundidad(imagenes[4]);
       imagen_del_volcado_ = imagenes[4];
@@ -11022,6 +11116,9 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     }
     if (REXCVAR_GET(cod2_nativo_prueba_z_mayor)) {
       profundidad.depthCompareOp = VK_COMPARE_OP_GREATER;
+    }
+    if (REXCVAR_GET(cod2_nativo_prueba_z_no_igual)) {
+      profundidad.depthCompareOp = VK_COMPARE_OP_NOT_EQUAL;
     }
 
     static constexpr VkBlendFactor kFactores[32] = {
@@ -12460,9 +12557,15 @@ class DibujosVulkanImpl final : public DibujosVulkan {
   // and whether this frame has already been dumped.
   const ImagenNativa* imagen_del_volcado_ = nullptr;
   uint64_t fotograma_volcado_ = UINT64_MAX;
-  bool volcado_activo_ = false;
-  uint32_t pases_volcados_ = 0;
   uint32_t volcados_del_fotograma_ = 0;
+  uint32_t pases_volcados_ = 0;  // TEMPORARY (cod2_nativo_volcar_profundidad_s)
+  uint32_t dibujos_z_volcados_ = 0;  // TEMPORARY (black scene)
+  // cod2_nativo_sin_z_quad_escena: the shader pair of the draw that writes the scene depth, and its count.
+  static constexpr uint32_t kQuadEscenaVs = 353;
+  static constexpr uint32_t kQuadEscenaPs = 620;
+  const bool sin_z_quad_escena_ = REXCVAR_GET(cod2_nativo_sin_z_quad_escena);
+  uint64_t quad_escena_sin_z_ = 0;
+  std::unordered_set<uint64_t> rechazos_con_profundidad_;  // TEMPORARY (black scene)
   // Vertex copies on a separate thread (EncolarCopia). Power-of-2 capacity.
   const bool copias_activas_ = REXCVAR_GET(cod2_nativo_subidas_hilo);
   std::array<TrabajoCopia, 8192> copias_{};
@@ -13005,6 +13108,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
   uint32_t pase_alto_ = 0;
   float pase_escala_ = 1.0f;  // 1 except in the scaled shadow map
   uint64_t borrados_profundidad_en_pase_ = 0;  // ZCULL
+  uint32_t avisos_borrado_profundidad_ = 0;  // TEMPORARY (black scene)
   std::chrono::steady_clock::time_point inicio_pase_{};  // pass change breakdown
   uint32_t pase_formatos_[5] = {};
   VkRenderPass pase_rp_ = VK_NULL_HANDLE;

@@ -4441,6 +4441,17 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
     copia.srcSubresource = {aspecto, 0, 0, 1};
     copia.dstSubresource = {aspecto, 0, 0, 1};
     copia.extent = {destino.ancho, alto, 1};
+    // TEMPORARY (black scene). This is the one copy in the port that writes into a depth render target with
+    // a 1280x720 extent, which is exactly the rectangle the depth dump finds full of 0.0 while the rest of
+    // the 1280x1280 image keeps 1.0. If the source texture holds 0.0, this copy is what puts it there.
+    if (aspecto == VK_IMAGE_ASPECT_DEPTH_BIT && destino.ancho >= 1000 && restauraciones_profundidad_ < 16) {
+      ++restauraciones_profundidad_;
+      REXLOG_INFO("[nativo] C6 restauracion de profundidad {}: {}x{} en el destino base {:03X} ({}x{}), desde la "
+                  "textura resuelta en {:08X}; la textura mide {}x{} formato {}",
+                  restauraciones_profundidad_, destino.ancho, alto, destino.resuelta_base, destino.ancho,
+                  destino.alto, destino.resuelta_base, it->second.imagen.ancho, it->second.imagen.alto,
+                  uint32_t(it->second.imagen.formato));
+    }
     AnotarUsoBorrado(destino, destino.ancho, alto);  // cod2_nativo_diag_borrados
     MarcarGpu(kGpuCopias);
     copiar_imagen_(comandos_trabajo_, it->second.imagen.imagen, VK_IMAGE_LAYOUT_GENERAL,
@@ -6174,6 +6185,7 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
   bool volcado_profundidad_hecho_ = false;  // TEMPORARY (cod2_nativo_volcar_profundidad_s)
   std::chrono::steady_clock::time_point ultimo_volcado_{};  // TEMPORARY
   uint32_t volcados_profundidad_ = 0;  // TEMPORARY
+  uint32_t restauraciones_profundidad_ = 0;  // TEMPORARY (black scene)
   bool alternancia_anotada_ = false;
   uint64_t intercambios_ = 0;    // resolves without a copy
   uint64_t restauraciones_ = 0;

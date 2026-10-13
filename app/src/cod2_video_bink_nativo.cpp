@@ -50,6 +50,23 @@
 REXCVAR_DEFINE_BOOL(cod2_video_bink_nativo, true, "COD2",
                     "COD2: descodifica las cinematicas de Bink con FFmpeg en vez de ejecutar la biblioteca de Bink "
                     "del propio juego. Apagado vuelve al camino del juego (0.46 fotogramas por segundo)");
+/*
+ * Skips the cutscenes, for working on the renderer.
+ *
+ * BinkOpen is `sub_82496B20`, and its only caller (cod2_recomp.51.cpp, guest 0x822D1B08) does
+ * `cmplwi cr6, r3, 0` / `beq cr6, 0x822D1BC4`: a null context is the game's own "this movie did not open"
+ * path, which calls one cleanup function and returns 0. So returning null without calling the guest's BinkOpen
+ * at all is a path the game already has and already handles - nothing is left half-open, because nothing was
+ * opened. The four intro movies (legal, atvi, IW_logo, cod2_intro: 4,712 frames between them) then cost no
+ * time, which is the difference between a run reaching the mission in 40 seconds and in three minutes.
+ *
+ * It is off by default: the cutscenes are part of the game. Turn it on to iterate on the renderer.
+ */
+REXCVAR_DEFINE_BOOL(cod2_video_saltar, false, "COD2",
+                    "COD2: no abre ninguna cinematica de Bink y devuelve el fallo que el juego ya sabe tratar, asi "
+                    "que las salta. Solo para trabajar en el renderizador: los cuatro videos de introduccion son "
+                    "4.712 fotogramas")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 extern "C" void __imp__sub_82496B20(PPCContext& __restrict ctx, uint8_t* base);
 extern "C" void __imp__sub_8249F980(PPCContext& __restrict ctx, uint8_t* base);
@@ -142,6 +159,12 @@ void EscribirPlanos(uint8_t* base, uint32_t descriptor, const cod2::video_bink::
 
 // BinkOpen. r3 is the finished path going in, and the 17,408-byte context coming out.
 REX_HOOK_RAW(sub_82496B20) {
+  // cod2_video_saltar. The guest's BinkOpen is not called at all: r3 goes back null, which is the failure the
+  // caller already branches on (see the comment on the cvar).
+  if (REXCVAR_GET(cod2_video_saltar)) {
+    ctx.r3.u32 = 0;
+    return;
+  }
   const bool activo = REXCVAR_GET(cod2_video_bink_nativo);
   const uint32_t camino = ctx.r3.u32;
   __imp__sub_82496B20(ctx, base);
