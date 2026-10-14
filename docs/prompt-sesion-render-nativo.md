@@ -126,41 +126,60 @@ the pre-pass was still being rejected, so it is now wrong and was rewritten.
 
 ### What is still open
 
-- **The full-screen quad** (VS n353 / PS n620, 6 indices, viewport 1280x720, zfunc 3, colour mask F) writes
-  z = 0.0 over the 1280x720 area at the start of the pass. With the per-frame clear on it no longer changes
-  the image (`cod2_nativo_sin_z_quad_escena` on/off gives the same capture), but nobody has explained what it
-  is for. It may be the game's own depth reset translated wrong (a "far" write the port turns into 0.0).
-- **The linear depth has no reader in the port.** Nothing samples base 0x260 as a 32-bit float, and the
-  game's resolve of that address is still rejected with cause 114 (the copy's source format is 14).
 - **Correctness of the depth order** is not proven yet, only that the image is no longer flat: no test has
-  looked for see-through walls, flicker or z-fighting yet.
+  looked for see-through walls, flicker or z-fighting yet. The evidence in favour is indirect and real: with
+  `cod2_nativo_prueba_z_siempre` (depthCompareOp = ALWAYS everywhere) the capture differs from the normal one
+  in 84.3 % of its pixels, so the depth test is doing work; and the mission's depth area holds 105,000-499,000
+  distinct values spread over 0.92-1.0, which is a fine-grained projection, not a degenerate one.
+- **The linear depth has no reader in the port.** Nothing samples base 0x260 as a 32-bit float, and the
+  game's resolve of that address is still rejected with cause 114 (the copy's source format is 14). Which
+  effects need it is unknown, so implementing the real R32F is deferred until one is identified.
+
+### The 2D effects that write z = 0.0 (settled)
+
+The draws that were called "the poison quad" are **VS n353 / PS n620, one or two per pass and many per
+frame**, and their geometry is a **small screen-space rectangle** (measured 679..694 x 334..353 px and
+302..319 x 593..606 px in the same frame), not a full-screen quad. Tracing one
+(`cod2_nativo_diag_fotograma_s` + `cod2_nativo_diag_vertices_ps=620`) gives their vertex constants:
+
+```
+c0 = (1/640, 0, 0, -1)   c1 = (0, -1/360, 0, 1)   c2 = (0, 0, 0, 0)   c3 = (0, 0, 0, 1)
+```
+
+Rows 0 and 1 map a pixel coordinate to NDC and reproduce the raw vertices exactly on screen, so the port's
+viewport/NDC conversion is right. **Row 2 is all zeros**, so `oPos.z` is 0 for every vertex and the window
+depth is 0.0 whatever the viewport range says: the game asks for it. `RB_DEPTHCONTROL 0x00700736` (z_write 1,
+zfunc 3) makes them write it. Against a persistent depth buffer those 0.0s reject the next frame's geometry,
+which is exactly what the per-frame clear undoes.
 
 ### Ground rules
 
 - **Measure, do not reason.** Every wrong turn in this port's history was a plausible argument nobody tested.
-  `abaliza.ps1`, `cod2_nativo_volcar_profundidad_s` and the pipeline-statistics cvars exist for that.
+  `tools/pc/casos_render_nativo.ps1`, `cod2_nativo_volcar_profundidad_s` and the pipeline-statistics cvars
+  exist for that.
 - **Do not commit game data** (no `.xex`, `.iso`, `.ff`, `.bik`, `.nfsp`, no `assets/`, no `generated/`), never
   `git add -f` under an ignored path, and do not add dependencies.
 - Every `app/src` file starts with `// cod2 - <one line>`, and when it exists to work around a specific
   failure the header explains the failure, the evidence, what it does instead, and the cvar that turns it off.
 - Mark deliberate shortcuts with a `ponytail:` comment naming the ceiling and the upgrade path.
 - **Commit and push on your own** (`git push`); the user does not want to be asked.
-- **Do not ask the user questions.** He will not answer. If something resists, consult the advisor teammate
-  (`asesor`) or a subagent with model id `Gemini 4 Argon` via `workflow`'s
-  `agent(prompt, {provider:'a6api', model:'Gemini 4 Argon'})` — it gave the decisive insight on this very bug.
+- The advisor is `agent(prompt, {provider: 'a6api-openai', model: 'gpt-6.1-sol'})` through `workflow`, with
+  `glm-5.3` at `a6api` as the fallback. The model id `""` and `Gemini 4 Argon` do not answer in this profile:
+  they return a canned line about loading skills.
 - Leave one runnable check behind for non-trivial logic, and say explicitly what was and was not verified.
 
 ### Temporary instrumentation that is still in the tree (remove once the image is correct)
 
 `cod2_nativo_sin_z_quad_escena` + `quad_escena_sin_z_`, the `C6 rechazo con profundidad` census +
-`rechazos_con_profundidad_`, `C6 dibujo que escribe Z` + `dibujos_z_volcados_`, the pass-by-pass depth dump
+`rechazos_con_profundidad_`, `C6 dibujo que escribe Z` + `dibujos_z_volcados_` + `quad_en_pase_` (the
+`*** CON EL QUAD ***` mark on the "DESPUES del pase" dump), the pass-by-pass depth dump
 (`cod2_nativo_volcar_profundidad_s`, `VolcarProfundidad`, `imagen_del_volcado_`, `fotograma_volcado_`,
 `pases_volcados_`, `volcados_del_fotograma_`, `volcados_profundidad_`), the `C6 borrado de profundidad en pase`
 probe, the `C6 tipo de copia` / `C6 peticion de borrado` / `C6 escritura de RB_DEPTH_CLEAR` probes and their
 three `unordered_set` members, the cause-214 log + `formato_temporal_`, `dibujos_con_shaders_` /
 `dibujos_sin_shaders_`, the `C5b`/`C6` temporal counters, and `tools/pc/instrumentar_dibujos.py`. The
 `cod2_nativo_prueba_*` measurement cvars (`sin_z`, `sin_cull`, `giro_inverso`, `z_siempre`, `z_mayor`,
-`z_no_igual`, `profundidad_por_fotograma`) stay until the black scene is closed.
+`z_no_igual`) stay until the image is verified correct.
 
 ### Also true and useful
 
@@ -178,7 +197,14 @@ three `unordered_set` members, the cause-214 log + `formato_temporal_`, `dibujos
   4 greater, 5 not-equal, 6 greater-equal, 7 always — the port's `VkCompareOp((d >> 4) & 0x7)` is correct.
 - Shader numbers in the logs are indices into the packed library, which is **sorted by fingerprint**
   (`app/src/cod2_shader_library.cpp`), not by container name, so `n353` cannot be mapped to a `.bin` file by
-  sorting the directory. To identify one, load the library and print its `original` bytes.
+  sorting the directory. `tools/comprobar_biblioteca_shaders.py <n>...` does it: it reads the library, checks
+  the sort order its binary search depends on, and names the `.bin` and `.hlsl` of each index. Verified:
+  `VS n353` = `v_000004.bin`, `PS n620` = `p_000064.bin`.
+- **A capture is only comparable with another from the same run.** The mission start is not deterministic
+  (the player's position and the scripted intro differ run to run), so two runs of the same cvar set differ in
+  94 % of their pixels. Compare captures inside one run, or compare categorical things (flat plane vs scene).
+  `tools/pc/casos_render_nativo.ps1` keeps the raw PNG per case instead of the brightened one `abaliza.ps1`
+  writes.
 - **Shaders live inside `.ff` fastfiles**, extracted to `assets/shaders_ff/` (`contenedores/`, `hlsl/`,
   `spirv/`, `cod2_shaders.nfsp`). `shaders/cod2_regenerar_biblioteca.ps1` regenerates the whole library;
   `shaders/cod2_hlsl.exe <contenedores> <hlsl> <shader_common.h>` translates one set of containers.

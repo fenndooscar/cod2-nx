@@ -3096,9 +3096,38 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
     for (uint32_t x = 0; x < imagen->ancho; x += 128) {
       fila += fmt::format(" {:08X}", media[x]);
     }
+    /*
+     * The render area on its own (the top 1280x720 of the pitch-sized image), because the whole-image
+     * histogram mixes it with the 560 rows nobody draws. What matters for the depth order is what the area
+     * the game actually draws holds: how much of it is still "far" (nothing was drawn there), how much is
+     * 0.0, and how many distinct values it holds. A correct frame has a few hundred thousand non-far texels
+     * with tens of thousands of distinct values; a frame whose depth was never rebuilt is either all far or
+     * has a couple of values.
+     */
+    const uint32_t alto_area = std::min<uint32_t>(720, imagen->alto);
+    uint64_t area_total = 0, area_lejos = 0, area_cero = 0;
+    std::unordered_map<uint32_t, uint64_t> area_cuenta;
+    for (uint32_t y = 0; y < alto_area; ++y) {
+      for (uint32_t x = 0; x < imagen->ancho; ++x) {
+        const uint32_t v = palabras[size_t(y) * imagen->ancho + x];
+        ++area_total;
+        if ((v & 0xFFFFFF) == 0xFFFFFF) {
+          ++area_lejos;
+        } else if ((v & 0xFFFFFF) == 0) {
+          ++area_cero;
+        }
+        ++area_cuenta[v];
+      }
+    }
     REXLOG_INFO("[nativo] C6 volcado de profundidad {}x{} (formato {}): {} valores distintos, menor {:08X} mayor "
-                "{:08X}; los mas frecuentes:{}; fila del medio:{}",
-                imagen->ancho, imagen->alto, uint32_t(imagen->formato), cuenta.size(), menor, mayor, lista, fila);
+                "{:08X}; los mas frecuentes:{}; fila del medio:{} | area {}x{}: {} texeles, {} distintos, {} lejos "
+                "({:.1f} %), {} a cero ({:.1f} %), {} con geometria ({:.1f} %)",
+                imagen->ancho, imagen->alto, uint32_t(imagen->formato), cuenta.size(), menor, mayor, lista, fila,
+                imagen->ancho, alto_area, area_total, area_cuenta.size(), area_lejos,
+                100.0 * double(area_lejos) / double(area_total), area_cero,
+                100.0 * double(area_cero) / double(area_total),
+                area_total - area_lejos - area_cero,
+                100.0 * double(area_total - area_lejos - area_cero) / double(area_total));
     DestruirLectura(lectura);
     // The diagnostic flushes the GPU, which is a frame-long stall. It is only for measurement.
     if (volcados_profundidad_++ == 0) {

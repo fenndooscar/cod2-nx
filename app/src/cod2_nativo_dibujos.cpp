@@ -688,11 +688,40 @@ REXCVAR_DEFINE_BOOL(cod2_nativo_profundidad_inicial, true, "COD2",
  *   - still 0.00 M       -> the 3D scene's own z cannot pass the game's test, and the search goes back to the
  *     shaders and the geometry.
  */
+/*
+ * The draws that write z = 0.0 into the scene's depth, and why they do it themselves.
+ *
+ * WHAT THEY ARE. Instrumenting every accepted draw with z_write in a pass of 1280 or more finds them all to
+ * be the same shader pair, VS n353 / PS n620, one or two per pass and many per frame. Tracing one
+ * (cod2_nativo_diag_fotograma_s + cod2_nativo_diag_vertices_ps=620) shows its geometry is a small
+ * screen-space rectangle - measured 679..694 x 334..353 pixels, and 302..319 x 593..606 in the same frame -
+ * not a full-screen quad. PS n620 samples a texture and multiplies it by the vertex colour: they are 2D
+ * effects (sprites, flashes, particles) drawn in pixel coordinates.
+ *
+ * WHY THEY WRITE 0.0, AND WHY THAT IS NOT A PORT BUG. Their vertex constants, read from the trace, are
+ * c0 = (1/640, 0, 0, -1), c1 = (0, -1/360, 0, 1), c2 = (0, 0, 0, 0), c3 = (0, 0, 0, 1). Rows 0 and 1 map a
+ * pixel coordinate to NDC and reproduce the raw vertices exactly on screen (a vertex at (679.4, 353.4)
+ * lands at pixel 679.4, 353.4), so the port's viewport and NDC conversion are right; row 2 is ALL ZEROS, so
+ * oPos.z is 0 for every vertex and the window depth is 0.0 whatever the viewport range says. The game asks
+ * for depth 0.0 by construction. RB_DEPTHCONTROL 0x00700736 (z_enable 1, z_write 1, zfunc 3 = LESS_OR_EQUAL)
+ * makes them write it.
+ *
+ * WHY IT MATTERS. Against the persistent depth buffer the console has, a sprite that leaves 0.0 at the end
+ * of a frame rejects every fragment of the next frame's geometry (LESS_OR_EQUAL against 0.0 is only true for
+ * 0.0). That is what the per-frame clear undoes (cod2_nativo_profundidad_por_fotograma). With it on, the
+ * mission's depth ends with 0 % of the render area at 0.0, 79-93 % carrying geometry and 105,000-499,000
+ * distinct values, and the capture is identical byte for byte with these draws' z_write on or off - which is
+ * why the cvar below is a measurement tool and not a fix.
+ *
+ * OFF WITHOUT A REBUILD: cod2_nativo_sin_z_quad_escena = false (the default) leaves them exactly as the game
+ * asks.
+ */
 REXCVAR_DEFINE_BOOL(cod2_nativo_sin_z_quad_escena, false, "COD2",
-                    "Renderizador nativo (prueba, 13/10): quita la escritura de profundidad al unico dibujo que "
-                    "la escribe en el destino de la escena (un quad de pantalla completa, VS n353/PS n620, 6 "
-                    "vertices) y deja todo lo demas igual. Si con esto aparece la escena, ese quad es lo que deja "
-                    "el bufer en 0.0 y rechaza todo lo demas. ROMPE LA IMAGEN: solo para medir")
+                    "Renderizador nativo (prueba, 13/10): quita la escritura de profundidad a los dibujos VS "
+                    "n353/PS n620 (los efectos 2D de pantalla que el juego dibuja con la fila Z de su matriz a "
+                    "cero, o sea con profundidad 0.0) y deja todo lo demas igual. Con el borrado por fotograma "
+                    "activo la imagen sale identica con esto encendido o apagado; sirve para medir. ROMPE LA "
+                    "IMAGEN: solo para medir")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 /*
  * The game's linear-depth pre-pass, and the colour format it was hidden behind.
@@ -703,16 +732,16 @@ REXCVAR_DEFINE_BOOL(cod2_nativo_sin_z_quad_escena, false, "COD2",
  * right after that pass (cod2_nativo_volcar_profundidad_s). Forcing depthCompareOp to NOT_EQUAL brings the
  * scene back (8.83 M fragments), so the buffer's content, not the geometry, is what rejects everything.
  *
- * THE EVIDENCE. Instrumenting every accepted draw with z_write in a pass of 1280 or more finds exactly one
- * per frame - a full-screen quad, VS n353 / PS n620, 6 indices, viewport 1280x720 - and it is the one that
- * leaves 0.0 over the render area. The draws that DO carry the scene's own depth write
- * (RB_DEPTHCONTROL 0x00700736: z_enable 1, z_write 1, zfunc 3, into RB_DEPTH_INFO base 0x530) never reach
- * the GPU: they ask for a colour target at RB_COLOR_INFO 0x000E0260 - EDRAM base 0x260, format 14 =
+ * THE EVIDENCE. Instrumenting every accepted draw with z_write in a pass of 1280 or more finds them all to
+ * be VS n353 / PS n620: 2D screen-space effects whose own vertex matrix has a zero Z row, so they write depth
+ * 0.0 (see the long comment on cod2_nativo_sin_z_quad_escena). The draws that DO carry the scene's own depth
+ * write (RB_DEPTHCONTROL 0x00700736: z_enable 1, z_write 1, zfunc 3, into RB_DEPTH_INFO base 0x530) never
+ * reached the GPU: they ask for a colour target at RB_COLOR_INFO 0x000E0260 - EDRAM base 0x260, format 14 =
  * k_32_FLOAT, pitch 1280, RB_COLOR_MASK 0xF - and the loop over the four colour targets accepted only
  * k_8_8_8_8 and k_8_8_8_8_GAMMA, so it rejected every one of them (636,168 draws in one run; cause 214 =
  * 200 + 14 was the only rejection cause that ever fired). That is Call of Duty's linear-depth pre-pass: view
  * depth as a float into an R32F target, plus the hardware depth write into 0x530. Rejecting it left the
- * scene's depth buffer with a single writer per frame - the quad - and that quad fills it with 0.0.
+ * scene's depth with no writer at all beyond those sprites, and their 0.0 was never undone.
  *
  * WHAT THIS DOES. It accepts k_32_FLOAT in that loop as well (the guest format is only part of the render
  * target's key, ObtenerDestino, so the port gives this one its own 1280x1280 RGBA8 image at base 0x260,
@@ -3544,6 +3573,16 @@ class DibujosVulkanImpl final : public DibujosVulkan {
                     (control_profundidad >> 4) & 0x7, r[gr::XE_GPU_REG_RB_COLOR_MASK], dibujos_en_pase_,
                     fotograma_);
       }
+      /*
+       * TEMPORARY (the quad). The depth image is dumped again when the pass that held this draw closes
+       * (VolcarProfundidad, from TerminarPase), because the pass-by-pass dump cannot tell whether the quad
+       * is in the pass it just measured. That is the one measurement that says whether this draw is what
+       * leaves the scene's depth at 0.0 - and whether that happens before or after the game's own depth
+       * pre-pass.
+       */
+      if (p.vs && p.vs->numero == kQuadEscenaVs && ps && ps->numero == kQuadEscenaPs && claves[4]) {
+        quad_en_pase_ = true;
+      }
       const bool estencil = (control_profundidad & 0x1) != 0;
       const bool ps_escribe_z = (ps->salidas & 0x10) != 0;
       const bool tardio = (especializacion & 0x2) || ps->descarta || ps_escribe_z;
@@ -5086,11 +5125,12 @@ class DibujosVulkanImpl final : public DibujosVulkan {
       // TEMPORARY (cod2_nativo_volcar_profundidad_s): the same depth image, now that this pass's draws have
       // run. The question is which pass turns the buffer into 0.0.
       if (imagen_del_volcado_) {
-        REXLOG_INFO("[nativo] C6 volcado: DESPUES del pase {} con {} dibujos dentro", pases_volcados_,
-                    dibujos_en_pase_);
+        REXLOG_INFO("[nativo] C6 volcado: DESPUES del pase {} con {} dibujos dentro{}", pases_volcados_,
+                    dibujos_en_pase_, quad_en_pase_ ? " *** CON EL QUAD ***" : "");
         contexto_->VolcarProfundidad(imagen_del_volcado_);
         imagen_del_volcado_ = nullptr;
       }
+      quad_en_pase_ = false;
       // Just in case. A pending sky with the pass already closed cannot be recorded; it is counted so it
       // shows up in the report instead of disappearing silently.
       if (cielo_pendiente_) {
@@ -10454,11 +10494,18 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     // TEMPORARY (cod2_nativo_volcar_profundidad_s): the frame in which a depth image is initialised and the
     // two after it are dumped pass by pass, before and after every pass with a depth attachment. If nothing
     // else writes the image, the frame that turns it into 0.0 has to be one of those three.
+    //
+    // And, since the per-frame clear (cod2_nativo_profundidad_por_fotograma) landed, also one steady frame
+    // every 400: the three frames of an image's life are usually a loading screen, and a loading screen says
+    // nothing about the depth the mission ends up with. The measurement that matters now is the distribution
+    // AFTER the scene's pass in a mission, which is what the "DESPUES del pase" dumps below give.
     if (primera_vez) {
       fotograma_volcado_ = fotograma_;
     }
+    const bool ventana_inicial = fotograma_ >= fotograma_volcado_ && fotograma_ <= fotograma_volcado_ + 2;
     const bool volcado_activo = REXCVAR_GET(cod2_nativo_volcar_profundidad_s) > 0 &&
-                                fotograma_ >= fotograma_volcado_ && fotograma_ <= fotograma_volcado_ + 2;
+                                (ventana_inicial || fotograma_ % 400 == 0) &&
+                                volcados_del_fotograma_ < 200;
     if (volcado_activo && imagenes[4] && volcados_del_fotograma_ < 200) {
       REXLOG_INFO("[nativo] C6 volcado: fotograma {} ANTES del pase {} (categoria {}, {}x{}, {} dibujos antes, "
                   "borra prof {})",
@@ -12649,6 +12696,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
   uint32_t volcados_del_fotograma_ = 0;
   uint32_t pases_volcados_ = 0;  // TEMPORARY (cod2_nativo_volcar_profundidad_s)
   uint32_t dibujos_z_volcados_ = 0;  // TEMPORARY (black scene)
+  bool quad_en_pase_ = false;        // TEMPORARY (the quad): this pass held the draw that writes z = 0.0
   // cod2_nativo_sin_z_quad_escena: the shader pair of the draw that writes the scene depth, and its count.
   static constexpr uint32_t kQuadEscenaVs = 353;
   static constexpr uint32_t kQuadEscenaPs = 620;
