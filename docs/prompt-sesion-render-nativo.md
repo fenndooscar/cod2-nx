@@ -186,6 +186,14 @@ zfunc 3) makes them write it. Against a persistent depth buffer those 0.0s rejec
 - **Measure, do not reason.** Every wrong turn in this port's history was a plausible argument nobody tested.
   `tools/pc/casos_render_nativo.ps1`, `cod2_nativo_volcar_profundidad_s` and the pipeline-statistics cvars
   exist for that.
+- **A flicker needs a whole session captured, not a screenshot.** `cod2_captura_cada_ms=250` with
+  `cod2_captura_escala=4` writes a 320x180 PNG every quarter second, and `tools/pc/buscar_parpadeo.py` names the
+  frames that jump out of and back into their neighbours. Ask the user to play with it on; a run of a few
+  minutes is a few thousand images and the tool ranks them.
+- **The frame's shape is one line, not sixty.** `cod2_nativo_diag_pases` (on by default) prints, once per
+  frame and only when it changes, one character per scene pass: `P` the depth pre-pass, `c` a colour pass that
+  only tests, `Z` one that writes depth, `C` one that clears, `x` a scene-sized pass with no depth at all. A
+  normal mission frame is `PZZZZZcZZZZZcZZZZZcZcxcx`. A line per pass was 7,000 lines per second.
 - **Do not commit game data** (no `.xex`, `.iso`, `.ff`, `.bik`, `.nfsp`, no `assets/`, no `generated/`), never
   `git add -f` under an ignored path, and do not add dependencies.
 - Every `app/src` file starts with `// cod2 - <one line>`, and when it exists to work around a specific
