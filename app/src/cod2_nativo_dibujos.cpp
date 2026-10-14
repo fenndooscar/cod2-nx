@@ -888,6 +888,27 @@ REXCVAR_DEFINE_BOOL(cod2_nativo_profundidad_en_prepase, true, "COD2",
                     "borrado caia en un pase de COLOR, dejaba el bufer entero a 1.0 sin ningun escritor de Z y "
                     "los pases siguientes se veian a traves de las paredes. false = comportamiento anterior")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+/*
+ * The free per-pass identity log, on by default.
+ *
+ * WHAT IT PRINTS, once per pass with a depth attachment, when the pass closes: the frame, the pass number
+ * inside that frame, the size, how many draws it held, whether it cleared the depth, how many of its draws
+ * write depth, the first draw's shaders and depth function, and the guest identity of the render targets (the
+ * colour format and the depth base). One line per pass, no GPU work at all.
+ *
+ * WHY IT IS ON. Every question of the form "in which order does this happen, and who does it" has been
+ * answered by this line, including the misplaced depth clear that made the walls transparent. With it off, a
+ * normal run says nothing about the order of a frame and the only way to see it is the depth dump, which is a
+ * full GPU stall per pass.
+ *
+ * OFF WITHOUT A REBUILD: cod2_nativo_diag_pases = false.
+ */
+REXCVAR_DEFINE_BOOL(cod2_nativo_diag_pases, true, "COD2",
+                    "Renderizador nativo: anota una linea por pase con adjunto de profundidad (fotograma, numero "
+                    "de pase, tamano, dibujos, si borra la profundidad, cuantos dibujos escriben Z, shaders del "
+                    "primero y formato/base de los destinos). Es gratis y es lo que dice el orden de un "
+                    "fotograma; false lo apaga")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_INT32(cod2_nativo_resplandor_suave_alternar_s, 0, "COD2",
                      "Renderizador nativo (prueba, build 150): con N > 0 va rotando el resplandor del cielo original, "
                      "natural y suave (cod2_resplandor_cielo) cada N segundos y anota cada cambio, para comparar "
@@ -5244,13 +5265,16 @@ class DibujosVulkanImpl final : public DibujosVulkan {
       quad_en_pase_ = false;
       // TEMPORARY (cod2_nativo_volcar_profundidad_s): a real depth pre-pass (the loading screen's has one draw)
       // opens the dense window, so the next passes with this depth are dumped one by one and the first colour
-      // pass's "ANTES" shows the depth the pre-pass left.
-      if (pase_es_prepase_ && dibujos_en_pase_ >= 20 && pasadas_denso_pendientes_ == 0) {
+      // pass's "ANTES" shows the depth the pre-pass left. Only when the dump is on: the trigger itself was
+      // printing a line per frame in every run, which buried the log.
+      if (pase_es_prepase_ && dibujos_en_pase_ >= 20 && pasadas_denso_pendientes_ == 0 &&
+          REXCVAR_GET(cod2_nativo_volcar_profundidad_s) > 0) {
         pasadas_denso_pendientes_ = 4;
         REXLOG_INFO("[nativo] C6 pre-pase de profundidad real: fotograma {}, {} dibujos dentro; se vuelcan los "
                     "siguientes 4 pases de la escena",
                     fotograma_, dibujos_en_pase_);
       }
+      const bool era_prepase = pase_es_prepase_;
       pase_es_prepase_ = false;
       /*
        * TEMPORARY (black scene): the frame's depth passes in order, with what decides the depth order of
@@ -5260,15 +5284,35 @@ class DibujosVulkanImpl final : public DibujosVulkan {
        * consuming depth it did not establish.
        */
       if (pase_numero_ != 0 || pase_sin_profundidad_log_) {
-        if (REXCVAR_GET(cod2_nativo_volcar_profundidad_s) > 0 && identidades_del_fotograma_ < 60 &&
-            pase_vs_z_ >= 0) {
-          ++identidades_del_fotograma_;
-          REXLOG_INFO("[nativo] C6 pase del fotograma {} numero {}: {}x{}, {} dibujos dentro, borra prof {}, "
-                      "{} escritores de Z, primer dibujo VS n{} PS n{} control Z {:08X}{}{}",
-                      fotograma_, pase_numero_, pase_ancho_log_, pase_alto_log_, dibujos_en_pase_,
-                      pase_borro_profundidad_ ? 1 : 0, pase_escritores_z_, pase_vs_z_, pase_ps_z_,
-                      pase_control_z_, pase_sin_profundidad_log_ ? " *** SIN PROFUNDIDAD ***" : "",
-                      pase_identidad_);
+        // TEMPORARY (black scene): accumulated into one summary line per frame (see UsarRanura), not one line
+        // per pass: measured at 60 passes per frame, 7,000 lines per second and 4 MB of log per nine minutes,
+        // which is a slowdown and impossible to read.
+        //
+        // Only the SCENE's passes go into the shape. The other passes with a depth attachment are the shadow
+        // map's cascades (160x720, depth base 010) and their number varies from frame to frame on its own, so
+        // counting them made the shape change constantly and the "different from the last one" signal useless
+        // (measured: 1,268 warnings in one session, none of them an artefact).
+        const bool es_escena = pase_ancho_log_ >= 1280;
+        if (es_escena) {
+          ++pases_escena_resumen_;
+          if (pase_borro_profundidad_) {
+            ++borrados_resumen_;
+            if (!era_prepase) {
+              ++borrados_fuera_de_prepase_;
+            }
+          }
+          escritores_z_resumen_ += pase_escritores_z_;
+          if (pase_sin_profundidad_log_) {
+            ++sin_profundidad_resumen_;
+          }
+          const char forma = pase_sin_profundidad_log_ ? 'x'
+                             : era_prepase ? 'P'
+                             : pase_borro_profundidad_ ? 'C'
+                             : (pase_escritores_z_ != 0) ? 'Z'
+                                                         : 'c';
+          if (firma_fotograma_.size() < 60) {
+            firma_fotograma_.push_back(forma);
+          }
         }
         pase_identidad_.clear();
         pase_control_z_ = 0;
@@ -5344,6 +5388,58 @@ class DibujosVulkanImpl final : public DibujosVulkan {
       compartidas_usado_ = 0;
     }
     ++epoca_subida_;
+    /*
+     * TEMPORARY (black scene): the summary of the frame that just ended, and the shape of the frame that
+     * starts, both only when they change.
+     *
+     * One line per pass was the original form of this instrument and it does not scale: 60 passes per frame,
+     * 7,000 lines per second, a 4 MB log every nine minutes. Worse, it cannot answer the question it exists
+     * for - an artefact that comes and goes - because the log is a stream and "this frame was different from
+     * the last hundred" is not something a reader can see in it.
+     *
+     * What goes out instead is one line when the frame's SHAPE changes (a string of P/c/Z/C/x, one character
+     * per scene pass), one line when the totals cross the limits below, and one line every 20 s with the
+     * counts either way. The shape is the useful part: it is the same string for every normal frame, and a
+     * frame in which the port does something else has a different one.
+     */
+    if (identidades_activas_ && !firma_fotograma_.empty()) {
+      const bool cambio = firma_fotograma_ != firma_anterior_;
+      const bool fuera_de_rango = pases_escena_resumen_ > 30 || borrados_fuera_de_prepase_ != 0 ||
+                                  sin_profundidad_resumen_ > 4;
+      const auto ahora = std::chrono::steady_clock::now();
+      const bool toca_informe = ahora >= proximo_informe_firma_;
+      if (cambio || fuera_de_rango || toca_informe) {
+        if (toca_informe) {
+          proximo_informe_firma_ = ahora + std::chrono::seconds(20);
+        }
+        // A change of shape alone is not worth a warning: the frame's own draw list varies all the time. What
+        // is worth one is a change in a way that costs occlusion (depth written or cleared outside the
+        // pre-pass, a scene pass with no depth at all) or a shape no normal frame has.
+        const bool sospechoso =
+            fuera_de_rango ||
+            firma_fotograma_.find('C') != std::string::npos ||
+            (firma_fotograma_.find('x') != std::string::npos && sin_profundidad_resumen_ != 2);
+        if (cambio || fuera_de_rango) {
+          REXLOG_INFO("[nativo] C6 forma del fotograma {}: {} ({} pases de escena, {} escritores de Z, {} "
+                      "borrados, {} de ellos fuera del pre-pase, {} pases sin profundidad){}",
+                      fotograma_, firma_fotograma_, pases_escena_resumen_, escritores_z_resumen_,
+                      borrados_resumen_, borrados_fuera_de_prepase_, sin_profundidad_resumen_,
+                      sospechoso ? "  <-- SOSPECHOSA" : "");
+        } else {
+          REXLOG_INFO("[nativo] C6 forma del fotograma (cada 20 s): {} ({} pases de escena, {} escritores de Z, "
+                      "{} borrados, {} fuera del pre-pase, {} sin profundidad)",
+                      firma_fotograma_, pases_escena_resumen_, escritores_z_resumen_, borrados_resumen_,
+                      borrados_fuera_de_prepase_, sin_profundidad_resumen_);
+        }
+        firma_anterior_ = firma_fotograma_;
+      }
+    }
+    firma_fotograma_.clear();
+    pases_escena_resumen_ = 0;
+    escritores_z_resumen_ = 0;
+    borrados_resumen_ = 0;
+    borrados_fuera_de_prepase_ = 0;
+    sin_profundidad_resumen_ = 0;
     ++fotograma_;
     pases_del_fotograma_ = 0;          // TEMPORARY (black scene): the frame's depth passes, in order
     identidades_del_fotograma_ = 0;    // TEMPORARY (black scene)
@@ -5376,6 +5472,11 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     alto_util_memo_activo_ = REXCVAR_GET(cod2_nativo_alto_util_memo) && !alto_util_memo_apagado_;
     clave_pase_rapida_ = REXCVAR_GET(cod2_nativo_clave_pase_rapida) && !clave_pase_rapida_apagada_;
     cvars_por_fotograma_ = REXCVAR_GET(cod2_nativo_cvars_por_fotograma);
+    // The free pass-identity log (cod2_nativo_diag_pases). On by default: it is one line per pass, its cost is
+    // in the noise, and reading the order of a frame out of a normal run is what found the misplaced depth
+    // clear. cod2_nativo_volcar_profundidad_s also turns it on, for the dumps that need the labels.
+    identidades_activas_ = REXCVAR_GET(cod2_nativo_diag_pases) ||
+                           REXCVAR_GET(cod2_nativo_volcar_profundidad_s) > 0;
     ps_solo_alfa_fotograma_ = PsSoloAlfa();
     sin_ps_sin_color_fotograma_ = SinPsSinColor();
     sin_vegetacion_ = REXCVAR_GET(cod2_sombras_sin_vegetacion);
@@ -12940,6 +13041,16 @@ class DibujosVulkanImpl final : public DibujosVulkan {
   uint64_t efectos_2d_z_en_pase_ = 0;
   uint64_t pases_del_fotograma_ = 0;       // TEMPORARY (black scene): passes with a depth attachment
   uint32_t identidades_del_fotograma_ = 0; // TEMPORARY (black scene): how many of them were logged
+  bool identidades_activas_ = false;       // TEMPORARY: cod2_nativo_diag_pases, read once per frame
+  // TEMPORARY (black scene): the frame's shape and totals, printed once per frame when they change.
+  std::string firma_fotograma_;
+  std::string firma_anterior_;
+  uint64_t pases_escena_resumen_ = 0;
+  uint64_t escritores_z_resumen_ = 0;
+  uint64_t borrados_resumen_ = 0;
+  uint64_t borrados_fuera_de_prepase_ = 0;
+  uint64_t sin_profundidad_resumen_ = 0;
+  std::chrono::steady_clock::time_point proximo_informe_firma_{};
   // TEMPORARY (black scene): the pass being recorded, printed by TerminarPase with its draw counters.
   std::string pase_identidad_;
   uint64_t pase_numero_ = 0;
