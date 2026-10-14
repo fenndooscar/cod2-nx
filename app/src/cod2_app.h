@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "cod2_ajustes_graficos.h"
+#include "cod2_nativo_captura.h"
 #include "cod2_nativo_sistema.h"
 #include "cod2_perfil_pc.h"
 #include "cod2_pc_simbolos.h"
@@ -227,9 +228,32 @@ class Cod2App : public rex::ReXApp {
     // code cannot be turned back into the sub_XXXXXXXX the generated code speaks in
     // (tools/pc/direccion.py).
     cod2::pc_simbolos::Escribir();
+    /*
+     * cod2_captura_cada_s. It has to be started HERE and not in the native graphics system, which is
+     * where it used to be: the whole point of the capture is to compare the two renderers
+     * (cod2_renderizador = "nativo" against the SDK's Xenos emulation, which is the reference), and a
+     * capture thread that only exists in one of them cannot do that. Measured: with the capture started
+     * from the native system, a run with cod2_renderizador = "xenos" wrote no PNG at all and said
+     * nothing about it.
+     *
+     * This is the right moment: OnPostSetup runs at the end of ConstructRuntime, after SetupPresentation
+     * has already stood the presenter up (sdk/src/ui/rex_app.cpp:105 and :115), and it runs for both
+     * backends because both reach their presenter through IGraphicsSystem. OnShutdown runs first in
+     * OnDestroy, before the presenter is torn down, so the thread is joined while the pointer is still
+     * valid.
+     *
+     * The presenter is asked for on every capture and not kept: with the native renderer it is created
+     * during setup and destroyed on a device loss, and a stale pointer would be a crash, not a wrong PNG.
+     */
+    cod2::captura::Arrancar([this]() -> rex::ui::Presenter* {
+      const rex::Runtime* rt = runtime();
+      const rex::system::IGraphicsSystem* gs = rt ? rt->graphics_system() : nullptr;
+      return gs ? gs->presenter() : nullptr;
+    });
   }
 
   void OnShutdown() override {
+    cod2::captura::Parar();
     cod2::perfil_pc::Parar();
     PararVigilante();
   }

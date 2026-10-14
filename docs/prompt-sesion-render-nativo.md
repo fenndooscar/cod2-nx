@@ -108,7 +108,7 @@ the 1.0 the buffer held, the quad would have been rejected, and the buffer would
 
 ### Next step
 
-**The black scene is closed.** Two changes, both in the tree and both measured in a mission:
+**The see-through walls are closed too.** Three changes, all measured in a mission:
 
 1. `cod2_nativo_formatos_extra` (new, default **true**): the loop over the four colour targets in `Dibujar`
    accepts `k_32_FLOAT` (format 14) as well. That is the colour target of the game's own linear-depth
@@ -117,20 +117,37 @@ the 1.0 the buffer held, the quad would have been rejected, and the buffer would
    value** (all 1.0) to **132,884**.
 2. `cod2_nativo_profundidad_por_fotograma` now defaults to **true**: the scene's depth is cleared to 1.0
    once per frame instead of once per image. Accepting the pre-pass alone is *not* enough — the image stays a
-   flat plane of sky colour and the diagnostic mosaic is identical with the poison quad on and off. With the
-   per-frame clear the raw capture goes from **95.9 % of its pixels being exactly (155,152,152)** to a real
-   3D scene, and the scene pass from 0.67-0.87 M fragments per frame to 2.72-6.52 M.
+   flat plane of sky colour. With the per-frame clear the raw capture goes from **95.9 % of its pixels being
+   exactly (155,152,152)** to a real 3D scene, and the scene pass from 0.67-0.87 M fragments per frame to
+   2.72-6.52 M.
+3. `cod2_nativo_profundidad_en_prepase` (new, default **true**): that clear lands on the **depth pre-pass**
+   (colour target `k_32_FLOAT`), not on "the first pass of the frame". The frame counter advances per
+   submission (`UsarRanura`) and the port gets several submissions per rendered frame, so "once per frame"
+   was really "once per submission" — and the first depth pass of a submission is a **colour** pass. The
+   clear wiped the depth the pre-pass had just written, nothing rebuilt it, and every colour pass after it
+   tested against 1.0. That was the report: *turning the camera, geometry comes out in front of the walls*.
+   The A/B is the mission: with the cvar off the walls come back.
 
-The old note in the cvar's comment ("a per-frame clear makes you see through the walls") was measured while
-the pre-pass was still being rejected, so it is now wrong and was rewritten.
+**How it was found, and how to find the next one.** The depth dump prints a **fingerprint of the render
+area**, so two dumps are one comparison of two numbers, and `tools/pc/leer_secuencia_pases.py` prints the
+whole sequence in order. The measurement:
+
+```
+pre-pass (k_32_FLOAT, 33 draws, 32 write Z)          -> 55.1 % of the area holds geometry
+the colour pass right after it (0 writers of Z)      -> IDENTICAL fingerprint
+next pass, new frame, k_8_8_8_8, CLEARS the depth    -> 100 % at 1.0, 0 geometry
+the rest of that frame's colour passes               -> testing against 1.0, everything passes
+```
 
 ### What is still open
 
-- **Correctness of the depth order** is not proven yet, only that the image is no longer flat: no test has
-  looked for see-through walls, flicker or z-fighting yet. The evidence in favour is indirect and real: with
-  `cod2_nativo_prueba_z_siempre` (depthCompareOp = ALWAYS everywhere) the capture differs from the normal one
-  in 84.3 % of its pixels, so the depth test is doing work; and the mission's depth area holds 105,000-499,000
-  distinct values spread over 0.92-1.0, which is a fine-grained projection, not a degenerate one.
+- **Small artefacts remain** (the user's words: "much better on the first run, some small artefacts"). Nobody
+  has looked at them yet.
+- **The colour pass's depth is not the pre-pass's.** `cod2_nativo_prueba_escritura_z` (forces
+  `depthWriteEnable = TRUE` on every depth pass) changes **77.9 %** of the pixels, which it should not if the
+  two passes computed the same z for the same geometry. The two use different shaders (pre-pass VS n497 /
+  PS n285, colour VS n488 / PS n1036), so the matrices, the constants or the viewport differ. That is the next
+  thread.
 - **The linear depth has no reader in the port.** Nothing samples base 0x260 as a 32-bit float, and the
   game's resolve of that address is still rejected with cause 114 (the copy's source format is 14). Which
   effects need it is unknown, so implementing the real R32F is deferred until one is identified.
@@ -149,8 +166,20 @@ c0 = (1/640, 0, 0, -1)   c1 = (0, -1/360, 0, 1)   c2 = (0, 0, 0, 0)   c3 = (0, 0
 Rows 0 and 1 map a pixel coordinate to NDC and reproduce the raw vertices exactly on screen, so the port's
 viewport/NDC conversion is right. **Row 2 is all zeros**, so `oPos.z` is 0 for every vertex and the window
 depth is 0.0 whatever the viewport range says: the game asks for it. `RB_DEPTHCONTROL 0x00700736` (z_write 1,
-zfunc 3) makes them write it. Against a persistent depth buffer those 0.0s reject the next frame's geometry,
-which is exactly what the per-frame clear undoes.
+zfunc 3) makes them write it. Against a persistent depth buffer those 0.0s reject the next frame's geometry.
+
+### The tools that made this findable
+
+- `tools/pc/leer_secuencia_pases.py <log> [frame]` prints the pass sequence with identities, clears, Z writers
+  and depth fingerprints. Reading an order out of the log by eye does not work.
+- `tools/pc/casos_render_nativo.ps1` runs one case per tag, waits for a real mission and keeps the raw PNG.
+- `tools/comprobar_biblioteca_shaders.py <n>...` names the shaders the log speaks of by index.
+- **One dump is a full GPU stall plus a 6.5 MB readback.** Measured with `cod2_nativo_volcar_profundidad_s=1`
+  in a mission: median frame **851 ms** (2284 ms with a longer window) against **68 ms** with it off. Never
+  leave it on and then judge performance.
+- **Frames per interval** come from the `C2: ... presentados=` line, not from the `[tiron]` frame reports: a
+  clean mission runs at 120 fps on this machine, so the renderer is not what a slow run is about.
+
 
 ### Ground rules
 

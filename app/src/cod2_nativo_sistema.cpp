@@ -804,7 +804,9 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
   }
 
   void Shutdown() override {
-    cod2::captura::Parar();  // before the presenter goes away
+    // cod2_captura is started and stopped by the app (cod2_app.h, OnPostSetup/OnShutdown) and not here:
+    // the capture exists to compare the two renderers, and a thread that only the native one starts
+    // cannot capture the SDK's Xenos emulation, which is the reference.
     ActivarGanchos(nullptr);  // the game hooks stop touching the library
     ActivarConsumidorMarcadores(false);  // FlushState goes back to the game's own path
     if (activo_.exchange(false)) {

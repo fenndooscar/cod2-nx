@@ -572,6 +572,50 @@ REXCVAR_DEFINE_BOOL(cod2_nativo_prueba_giro_inverso, false, "COD2",
                     "descarte de caras como esta. Separa 'el descarte de caras esta mal' de 'la cara frontal esta al "
                     "reves'. ROMPE LA IMAGEN: solo para medir")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+/*
+ * The see-through walls: does the colour pass see the depth the pre-pass wrote, and is it the same depth?
+ *
+ * THE SYMPTOM. Turning the camera, geometry comes out in front of walls that should hide it. The scene is not
+ * black any more and most of the frame is right, so the depth test is doing something.
+ *
+ * WHAT IS ALREADY MEASURED, and what it rules out. In a mission the frame runs in this order, and the same
+ * order in every frame of the log:
+ *
+ *   pass 1  colour target k_32_FLOAT (the game's linear-depth pre-pass), depth base 530, CLEARS the depth,
+ *           26 draws, 25 of which write depth, their RB_DEPTHCONTROL 00724F36 (test 1, write 1, LESS_OR_EQUAL);
+ *   then    ~14 colour passes into the same colour target (k_8_8_8_8) and the same depth image, which do NOT
+ *           clear it and whose draws carry 00724F32 (test 1, write 0, LESS_OR_EQUAL) - not one of them writes
+ *           depth, they all only test.
+ *
+ * So the order is the right one and the per-frame clear lands on the pre-pass, which is what the pre-pass needs.
+ * What is NOT measured is whether the depth the pre-pass leaves is the depth the colour pass compares against:
+ * the two passes use different shaders (VS n497/PS n285 against VS n488/PS n1036), so "both declare base 530"
+ * says nothing about the value.
+ *
+ * WHAT THIS DOES. It forces VK_TRUE on depthWriteEnable for every draw of a pass with a depth attachment. On the
+ * console the colour pass does not write depth because the pre-pass already did; with this on it writes it too.
+ * It is not a fix - it makes the depth of a pass depend on its own submission order - it is an experiment with
+ * one verdict:
+ *
+ *   - the image loses the see-through walls  -> the pre-pass's depth is not covering the geometry the colour
+ *     pass draws (or is not reaching it at all), and the pre-pass, not the depth test, is what has to be
+ *     examined;
+ *   - the image stays the same or gets worse  -> the depth the colour pass computes is not the depth the
+ *     pre-pass wrote, i.e. two different z for the same geometry, and the search is in the shaders, the
+ *     constants and the viewport of the two passes.
+ *
+ * It also makes the second reading free: the depth dump prints the same image before and after a colour pass, so
+ * with this on, a buffer that changes a lot between those two dumps is a buffer where the two passes disagree
+ * about z.
+ *
+ * ROMPE LA IMAGEN: solo para medir.
+ */
+REXCVAR_DEFINE_BOOL(cod2_nativo_prueba_escritura_z, false, "COD2",
+                    "Renderizador nativo (prueba): obliga a depthWriteEnable = TRUE en todos los dibujos de un "
+                    "pase con adjunto de profundidad, aunque el juego pida no escribir (la escena escribe 0). "
+                    "Separa 'el pre-pase no cubre la geometria del pase de color' de 'los dos pases calculan "
+                    "profundidades distintas'. ROMPE LA IMAGEN: solo para medir")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_BOOL(cod2_nativo_prueba_z_siempre, false, "COD2",
                     "Renderizador nativo (prueba, 13/10): deja el adjunto de profundidad como esta pero pone "
                     "depthCompareOp = ALWAYS en todos los pipelines. Medido: sin descarte de caras y con la prueba "
@@ -804,9 +848,45 @@ REXCVAR_DEFINE_BOOL(cod2_nativo_profundidad_por_fotograma, true, "COD2",
                     "en cada fotograma, en vez de solo en el primer pase de la imagen. El juego no manda nunca "
                     "ese clear y su comparacion es LESS_OR_EQUAL, asi que sin esto el bufer solo se acerca con "
                     "los fotogramas y acaba rechazando la geometria del actual: medido, la imagen se queda en un "
-                    "plano de color cielo con trozos de geometria muy cercana. Con el pre-pase de profundidad "
-                    "aceptado (cod2_nativo_formatos_extra) el fotograma reconstruye la profundidad entera, que es "
-                    "lo que el juego espera. false = se borra una sola vez por imagen (imagen plana)")
+                    "plano de color cielo con trozos de geometria muy cercana. false = se borra una sola vez por "
+                    "imagen (imagen plana)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+/*
+ * WHERE in the frame that clear goes, which turned out to be the whole story.
+ *
+ * THE MEASUREMENT. With the clear on "the first pass of this frame that uses the depth image", the dump says
+ * when it actually happens. The fingerprint of the render area (the depth dump's `huella`) is the same number
+ * for the same buffer content, so the sequence can be read without looking at anything:
+ *
+ *   pre-pase (color0 = formato 14, 33 dibujos, 32 de ellos escriben Z)  -> 55.1 % del area con geometria
+ *   pase de color siguiente (0 escritores de Z)                         -> huella IDENTICA: recibe la profundidad
+ *   pase siguiente, fotograma nuevo, color0 = formato 0, BORRA prof 1   -> 100 % a 1.0, 0 geometria
+ *   los siguientes pases de color de ese fotograma                      -> 0 escritores de Z, contra 1.0 todo pasa
+ *
+ * The frame counter the cvar uses advances per submission (UsarRanura), and the renderer gets several
+ * submissions per rendered frame, so "once per frame" was really "once per submission" - and the first depth
+ * pass of a submission is a COLOUR pass, not the pre-pass. The clear wiped the depth the pre-pass had written,
+ * nothing rebuilt it in that submission, and every colour pass after it drew with the depth test wide open.
+ * That is exactly the reported symptom: turning the camera, geometry comes out in front of the walls.
+ *
+ * WHAT THIS DOES. The clear goes where the game's own depth cycle begins: the pass whose colour target is
+ * k_32_FLOAT (guest format 14), the linear-depth pre-pass. It is the only pass that rebuilds the whole depth
+ * (25-32 of its 33 draws write Z, with LESS_OR_EQUAL, so it needs the buffer at far) and it runs once per
+ * rendered frame. The colour passes around it no longer clear anything, which is what the console does: they
+ * consume the depth that is already there.
+ *
+ * WHAT IT DOES NOT DO. If a frame has no such pre-pass, the clear falls back to the old per-frame behaviour,
+ * and the first use of a depth image is still cleared (cod2_nativo_profundidad_inicial).
+ *
+ * OFF WITHOUT A REBUILD: cod2_nativo_profundidad_en_prepase = false restores "the first pass of the frame",
+ * which is the measurement above.
+ */
+REXCVAR_DEFINE_BOOL(cod2_nativo_profundidad_en_prepase, true, "COD2",
+                    "Renderizador nativo (14/10): el borrado por fotograma de la profundidad de la escena se "
+                    "hace en el pre-pase de profundidad del juego (el pase cuyo color0 es k_32_FLOAT), y no en el "
+                    "primer pase del fotograma que la use. Medido con la huella del area: con lo segundo el "
+                    "borrado caia en un pase de COLOR, dejaba el bufer entero a 1.0 sin ningun escritor de Z y "
+                    "los pases siguientes se veian a traves de las paredes. false = comportamiento anterior")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_INT32(cod2_nativo_resplandor_suave_alternar_s, 0, "COD2",
                      "Renderizador nativo (prueba, build 150): con N > 0 va rotando el resplandor del cielo original, "
@@ -3563,7 +3643,38 @@ class DibujosVulkanImpl final : public DibujosVulkan {
       // TEMPORARY (black scene). The scene's depth buffer ends up at 0.0 over exactly the 1280x720 render
       // area, and no clear of the port does it. This prints every draw that writes depth in a pass of 1280
       // pixels or more, with its geometry: whoever covers the whole area with a z of 0.0 is the one.
-      if (escribe_z && pitch >= 1280 && dibujos_z_volcados_ < 60) {
+      //
+      // The 2D screen-space effects (VS n353 / PS n620; see cod2_nativo_sin_z_quad_escena) are excluded and
+      // counted apart: there are dozens per frame, they all write 0.0 by construction, and they filled the
+      // 60-entry budget on their own, which hid the real question - whether the scene's own geometry writes
+      // depth at all.
+      const bool es_efecto_2d = p.vs && p.vs->numero == kQuadEscenaVs && ps && ps->numero == kQuadEscenaPs;
+      if (es_efecto_2d) {
+        ++efectos_2d_z_en_pase_;
+      } else {
+        ++escritores_z_en_pase_;
+      }
+      /*
+       * TEMPORARY (black scene): the depth state of the pass's own draws, which is what decides whether the
+       * pass can be the one that establishes the frame's occlusion. `z_funcion` 7 (ALWAYS) with z_write means
+       * the pass rewrites the buffer regardless of what was there; 3 (LESS_OR_EQUAL) with z_write means it
+       * needs the buffer to have been cleared first. The first draw's value is the one that matters for the
+       * question, the count of writers says how much of the pass establishes depth.
+       */
+      if (escribe_z && !es_efecto_2d) {
+        ++pase_escritores_z_;
+      }
+      /*
+       * TEMPORARY (black scene): the first draw of the pass, which is the one whose value decides what the
+       * pass does with the depth buffer (a pass that opens with LESS_OR_EQUAL against a buffer it did not
+       * clear is consuming depth somebody else established).
+       */
+      if (dibujos_en_pase_ == 0) {
+        pase_control_z_ = control_profundidad;
+        pase_vs_z_ = p.vs ? int(p.vs->numero) : -1;
+        pase_ps_z_ = ps ? int(ps->numero) : -1;
+      }
+      if (escribe_z && pitch >= 1280 && !es_efecto_2d && dibujos_z_volcados_ < 60) {
         ++dibujos_z_volcados_;
         REXLOG_INFO("[nativo] C6 dibujo que escribe Z: VS n{} PS n{} tipo {} cuenta {} indices {} viewport "
                     "{:.1f},{:.1f} {:.1f}x{:.1f} z {:.3f}-{:.3f} funcion {} mascara {:X} en el pase {} del "
@@ -5131,6 +5242,41 @@ class DibujosVulkanImpl final : public DibujosVulkan {
         imagen_del_volcado_ = nullptr;
       }
       quad_en_pase_ = false;
+      // TEMPORARY (cod2_nativo_volcar_profundidad_s): a real depth pre-pass (the loading screen's has one draw)
+      // opens the dense window, so the next passes with this depth are dumped one by one and the first colour
+      // pass's "ANTES" shows the depth the pre-pass left.
+      if (pase_es_prepase_ && dibujos_en_pase_ >= 20 && pasadas_denso_pendientes_ == 0) {
+        pasadas_denso_pendientes_ = 4;
+        REXLOG_INFO("[nativo] C6 pre-pase de profundidad real: fotograma {}, {} dibujos dentro; se vuelcan los "
+                    "siguientes 4 pases de la escena",
+                    fotograma_, dibujos_en_pase_);
+      }
+      pase_es_prepase_ = false;
+      /*
+       * TEMPORARY (black scene): the frame's depth passes in order, with what decides the depth order of
+       * each one. The dump of the image itself costs a GPU stall and can only be sampled; this line is free
+       * and says which pass cleared, how many of its draws write depth, and what the first draw's depth
+       * function is - a pass whose first draw is LESS_OR_EQUAL against a buffer that was NOT cleared here is
+       * consuming depth it did not establish.
+       */
+      if (pase_numero_ != 0 || pase_sin_profundidad_log_) {
+        if (REXCVAR_GET(cod2_nativo_volcar_profundidad_s) > 0 && identidades_del_fotograma_ < 60 &&
+            pase_vs_z_ >= 0) {
+          ++identidades_del_fotograma_;
+          REXLOG_INFO("[nativo] C6 pase del fotograma {} numero {}: {}x{}, {} dibujos dentro, borra prof {}, "
+                      "{} escritores de Z, primer dibujo VS n{} PS n{} control Z {:08X}{}{}",
+                      fotograma_, pase_numero_, pase_ancho_log_, pase_alto_log_, dibujos_en_pase_,
+                      pase_borro_profundidad_ ? 1 : 0, pase_escritores_z_, pase_vs_z_, pase_ps_z_,
+                      pase_control_z_, pase_sin_profundidad_log_ ? " *** SIN PROFUNDIDAD ***" : "",
+                      pase_identidad_);
+        }
+        pase_identidad_.clear();
+        pase_control_z_ = 0;
+        pase_escritores_z_ = 0;
+        pase_vs_z_ = -1;
+        pase_ps_z_ = -1;
+        pase_sin_profundidad_log_ = false;
+      }
       // Just in case. A pending sky with the pass already closed cannot be recorded; it is counted so it
       // shows up in the report instead of disappearing silently.
       if (cielo_pendiente_) {
@@ -5199,6 +5345,8 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     }
     ++epoca_subida_;
     ++fotograma_;
+    pases_del_fotograma_ = 0;          // TEMPORARY (black scene): the frame's depth passes, in order
+    identidades_del_fotograma_ = 0;    // TEMPORARY (black scene)
     CerrarFotogramaDeLaGuardiaDelCielo();
     // cod2_reflejo_visibilidad, once per submission (the guard may switch it off mid-session).
     medir_visibilidad_ = cod2::reflejo_demanda::MedirVisibilidad();
@@ -10480,37 +10628,114 @@ class DibujosVulkanImpl final : public DibujosVulkan {
      *
      * OFF WITHOUT A REBUILD: cod2_nativo_profundidad_inicial = false.
      */
-    // Once per image, on its first pass; and again on every frame with cod2_nativo_profundidad_por_fotograma
-    // (which is what makes the depth order wrong: see the comment above).
+    // Once per image, on its first pass; and again where the game's own depth cycle begins with
+    // cod2_nativo_profundidad_por_fotograma + cod2_nativo_profundidad_en_prepase (see the comment above).
     const bool primera_vez = imagenes[4] && profundidad_iniciada_.insert(imagenes[4]).second;
+    /*
+     * The game's linear-depth pre-pass: a colour target at k_32_FLOAT over the scene's depth. It is the pass
+     * that rebuilds the frame's depth from far (32 of its 33 draws write Z with LESS_OR_EQUAL), and it is the
+     * only one that can absorb a clear without losing occlusion - see the comment above.
+     */
+    const bool es_prepase_profundidad =
+        claves[4] && claves[0] &&
+        (((claves[0] >> 16) & 0xF) == uint32_t(xenos::ColorRenderTargetFormat::k_32_FLOAT));
     const bool por_fotograma = imagenes[4] && REXCVAR_GET(cod2_nativo_profundidad_por_fotograma) &&
+                               (!REXCVAR_GET(cod2_nativo_profundidad_en_prepase) || es_prepase_profundidad) &&
                                profundidad_borrada_en_[imagenes[4]] != fotograma_;
-    if (imagenes[4]) {
+    if (imagenes[4] && por_fotograma) {
       profundidad_borrada_en_[imagenes[4]] = fotograma_;
     }
     const bool borrar_profundidad =
         imagenes[4] && !es_sombras &&
         ((REXCVAR_GET(cod2_nativo_profundidad_inicial) && primera_vez) || por_fotograma);
-    // TEMPORARY (cod2_nativo_volcar_profundidad_s): the frame in which a depth image is initialised and the
-    // two after it are dumped pass by pass, before and after every pass with a depth attachment. If nothing
-    // else writes the image, the frame that turns it into 0.0 has to be one of those three.
-    //
-    // And, since the per-frame clear (cod2_nativo_profundidad_por_fotograma) landed, also one steady frame
-    // every 400: the three frames of an image's life are usually a loading screen, and a loading screen says
-    // nothing about the depth the mission ends up with. The measurement that matters now is the distribution
-    // AFTER the scene's pass in a mission, which is what the "DESPUES del pase" dumps below give.
+    // TEMPORARY (cod2_nativo_volcar_profundidad_s): when the image is dumped.
+    /*
+     * TEMPORARY (cod2_nativo_volcar_profundidad_s): when the image is dumped.
+     *
+     * Three windows, because they answer three different questions and one of them is not enough:
+     *   - the frame a depth image is created and the two after it, for the question "who turns a new image
+     *     into 0.0" (those are usually a loading screen);
+     *   - the passes that follow a real depth pre-pass, one by one (see below) - the order question;
+     *   - one frame every 400, as a steady sample of what the depth ends up as.
+     *
+     * Each dump is a full GPU stall plus a 6.5 MB readback. Measured with this on in a mission: 106 frame
+     * reports with a median of 851 ms (and 2284 ms with a longer window), against 68 ms with it off. It is a
+     * measurement tool, off by default, and it is not a performance measurement of anything.
+     */
+    /*
+     * The dense window: the passes that follow a real depth pre-pass, dumped one by one.
+     *
+     * Counting frames does not work (the frame counter advances per submission, so the window covered a single
+     * pass) and a fixed frame number does not work either (measured: frame 700 lands in the intro movie, and
+     * the first pre-pass of the run lands in a loading screen where the depth is all 0.0 and says nothing).
+     * The signal is the pre-pass itself, and the one that matters is the one from a mission: it is recognised
+     * at close, by its colour target being k_32_FLOAT (guest format 14) on the scene's depth with a couple of
+     * dozen draws in it - the loading screen's has one. From there the next few passes with that same depth
+     * are dumped, so the first colour pass's "ANTES" dump is the depth the pre-pass left, which is the whole
+     * question: does the colour pass receive what the pre-pass wrote.
+     */
     if (primera_vez) {
       fotograma_volcado_ = fotograma_;
     }
+    const bool ventana_densa = pasadas_denso_pendientes_ > 0;
     const bool ventana_inicial = fotograma_ >= fotograma_volcado_ && fotograma_ <= fotograma_volcado_ + 2;
+    /*
+     * Only the scene's own passes are dumped once the window is open. Measured: the passes that follow the
+     * pre-pass are the shadow map's (160x720, depth base 010, one per shadow cascade), and dumping those cost
+     * a GPU stall each for an image the question is not about - with 40 of them the game died before reaching
+     * the menu. The window counts only the passes into the scene's depth at 1280 wide, so four of them are
+     * eight stalls: the pre-pass's own dump (the depth before it) and then one per colour pass.
+     */
+    const bool interesante = claves[4] && ancho >= 1280 && ((claves[4] >> 24) & 0xFFF) == 0x530;
+    if (ventana_densa && interesante) {
+      --pasadas_denso_pendientes_;
+    }
     const bool volcado_activo = REXCVAR_GET(cod2_nativo_volcar_profundidad_s) > 0 &&
-                                (ventana_inicial || fotograma_ % 400 == 0) &&
+                                (ventana_inicial || (ventana_densa && interesante) ||
+                                 fotograma_ % 400 == 0) &&
                                 volcados_del_fotograma_ < 200;
+    /*
+     * The guest identity of this pass, so the pass sequence can be read without guessing: the colour
+     * render target's guest format (k_32_FLOAT = 14 is the linear-depth pre-pass, k_8_8_8_8 = 6 is the
+     * scene's colour) and the depth target's base. The port's own VkFormat cannot tell them apart - every
+     * colour target is RGBA8 - and that is exactly what made the earlier readings of this log ambiguous.
+     *
+     * Logged for EVERY pass with a depth attachment, not only for the frames the image dump samples: the
+     * dump costs a GPU stall, so it can only be taken now and then, and reading the order of a frame out of
+     * one dump per frame is impossible - it says which passes exist, never in which order. This line is
+     * free. It goes out when the pass closes (TerminarPase), which is the first moment the pass's own draw
+     * counters are complete.
+     */
+    std::string pasada;
+    for (uint32_t i = 0; i < 4; ++i) {
+      pasada += claves[i] ? fmt::format(" color{}=f{}/base{:03X}", i, uint32_t(claves[i] >> 16) & 0xF,
+                                        uint32_t(claves[i] >> 24) & 0xFFF)
+                          : fmt::format(" color{}=no", i);
+    }
+    if (claves[4]) {
+      pasada += fmt::format(" prof=base{:03X}/f{}", uint32_t(claves[4] >> 24) & 0xFFF,
+                            uint32_t(claves[4] >> 16) & 0x1);
+    }
+    pase_identidad_ = pasada;
+    pase_borro_profundidad_ = borrar_profundidad;
+    pase_ancho_log_ = ancho;
+    pase_alto_log_ = alto;
+    pase_sin_profundidad_log_ = !claves[4] && ancho >= 1280;
+    // TEMPORARY (cod2_nativo_volcar_profundidad_s): this is the game's linear-depth pre-pass, the one whose
+    // depth the colour passes are supposed to inherit. The window opens here (see TerminarPase).
+    pase_es_prepase_ = claves[4] && claves[0] &&
+                       (((claves[0] >> 16) & 0xF) == uint32_t(xenos::ColorRenderTargetFormat::k_32_FLOAT));
+    if (claves[4]) {
+      ++pases_del_fotograma_;
+      pase_numero_ = pases_del_fotograma_;
+    } else {
+      pase_numero_ = 0;
+    }
     if (volcado_activo && imagenes[4] && volcados_del_fotograma_ < 200) {
       REXLOG_INFO("[nativo] C6 volcado: fotograma {} ANTES del pase {} (categoria {}, {}x{}, {} dibujos antes, "
-                  "borra prof {})",
+                  "borra prof {}){}",
                   fotograma_, ++pases_volcados_, categoria_pase_, ancho, alto, dibujos_en_pase_,
-                  borrar_profundidad ? 1 : 0);
+                  borrar_profundidad ? 1 : 0, pasada);
       contexto_->VolcarProfundidad(imagenes[4]);
       imagen_del_volcado_ = imagenes[4];
       ++volcados_del_fotograma_;
@@ -10599,6 +10824,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     pase_comandos_ = cmd;
     dibujos_en_pase_ = 0;  // position within the pass (deferred sky report)
     pase_clave_ = clave_pase;
+    pase_escritores_z_ = 0;  // TEMPORARY (black scene)
     std::memcpy(pase_claves_, claves, sizeof(pase_claves_));  // the bytes that produce pase_clave_
     pase_claves_validas_ = true;
     ++pase_serie_;  // the cached framing depends on the pass size and scale
@@ -11255,6 +11481,11 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     }
     if (REXCVAR_GET(cod2_nativo_prueba_z_no_igual)) {
       profundidad.depthCompareOp = VK_COMPARE_OP_NOT_EQUAL;
+    }
+    // cod2_nativo_prueba_escritura_z: see the comment next to the cvar. Read once per pipeline creation, so it
+    // has to be set at startup.
+    if (REXCVAR_GET(cod2_nativo_prueba_escritura_z) && clave.formatos[4]) {
+      profundidad.depthWriteEnable = VK_TRUE;
     }
 
     static constexpr VkBlendFactor kFactores[32] = {
@@ -12694,9 +12925,37 @@ class DibujosVulkanImpl final : public DibujosVulkan {
   const ImagenNativa* imagen_del_volcado_ = nullptr;
   uint64_t fotograma_volcado_ = UINT64_MAX;
   uint32_t volcados_del_fotograma_ = 0;
+  int64_t fotograma_dump_denso_ = -1;  // TEMPORARY: the mission frame the dense dump window starts in
+  uint32_t pasadas_desde_denso_ = 0;   // TEMPORARY: how many passes of that window have been taken
+  // TEMPORARY (cod2_nativo_volcar_profundidad_s): how many passes are still dumped one by one from here. The
+  // dense window is opened by the mission's own depth pre-pass (see TerminarPase).
+  uint32_t pasadas_denso_pendientes_ = 0;
+  bool pase_es_prepase_ = false;
   uint32_t pases_volcados_ = 0;  // TEMPORARY (cod2_nativo_volcar_profundidad_s)
   uint32_t dibujos_z_volcados_ = 0;  // TEMPORARY (black scene)
   bool quad_en_pase_ = false;        // TEMPORARY (the quad): this pass held the draw that writes z = 0.0
+  // TEMPORARY (black scene): draws that write depth per scene pass, split into the game's geometry and the
+  // 2D screen-space effects. Reported by InformeZTemprana next to the scene's draw count.
+  uint64_t escritores_z_en_pase_ = 0;
+  uint64_t efectos_2d_z_en_pase_ = 0;
+  uint64_t pases_del_fotograma_ = 0;       // TEMPORARY (black scene): passes with a depth attachment
+  uint32_t identidades_del_fotograma_ = 0; // TEMPORARY (black scene): how many of them were logged
+  // TEMPORARY (black scene): the pass being recorded, printed by TerminarPase with its draw counters.
+  std::string pase_identidad_;
+  uint64_t pase_numero_ = 0;
+  bool pase_borro_profundidad_ = false;
+  uint32_t pase_ancho_log_ = 0;
+  uint32_t pase_alto_log_ = 0;
+  // TEMPORARY (black scene): the pass's own depth picture, which is what tells a pass that ESTABLISHES the
+  // frame's depth (zfunc 7, ALWAYS, or a cleared buffer) from one that consumes it (LESS_OR_EQUAL).
+  uint32_t pase_control_z_ = 0;
+  uint64_t pase_escritores_z_ = 0;
+  int32_t pase_vs_z_ = -1;
+  int32_t pase_ps_z_ = -1;
+  // TEMPORARY (black scene): a pass into a scene-sized colour target with no depth attachment at all. It is
+  // the one kind of pass that cannot be occluded by the scene and cannot occlude it, and the report counts 1.5
+  // to 2.0 Mtexels per frame of them.
+  bool pase_sin_profundidad_log_ = false;
   // cod2_nativo_sin_z_quad_escena: the shader pair of the draw that writes the scene depth, and its count.
   static constexpr uint32_t kQuadEscenaVs = 353;
   static constexpr uint32_t kQuadEscenaPs = 620;

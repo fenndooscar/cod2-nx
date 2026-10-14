@@ -3106,6 +3106,7 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
      */
     const uint32_t alto_area = std::min<uint32_t>(720, imagen->alto);
     uint64_t area_total = 0, area_lejos = 0, area_cero = 0;
+    uint64_t area_hash = 1469598103934665603ull;  // FNV-1a: the area's content as one number
     std::unordered_map<uint32_t, uint64_t> area_cuenta;
     for (uint32_t y = 0; y < alto_area; ++y) {
       for (uint32_t x = 0; x < imagen->ancho; ++x) {
@@ -3117,17 +3118,23 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
           ++area_cero;
         }
         ++area_cuenta[v];
+        area_hash = (area_hash ^ uint64_t(v & 0xFFFFFF)) * 1099511628211ull;
       }
     }
+    /*
+     * The area's hash is what makes two dumps comparable without a human: "the depth after the pre-pass" and
+     * "the depth before the colour pass" are the same buffer at two moments, and the identical hash says the
+     * colour pass received exactly what the pre-pass wrote. Equal counts with different hashes do not.
+     */
     REXLOG_INFO("[nativo] C6 volcado de profundidad {}x{} (formato {}): {} valores distintos, menor {:08X} mayor "
                 "{:08X}; los mas frecuentes:{}; fila del medio:{} | area {}x{}: {} texeles, {} distintos, {} lejos "
-                "({:.1f} %), {} a cero ({:.1f} %), {} con geometria ({:.1f} %)",
+                "({:.1f} %), {} a cero ({:.1f} %), {} con geometria ({:.1f} %), huella {:016X}",
                 imagen->ancho, imagen->alto, uint32_t(imagen->formato), cuenta.size(), menor, mayor, lista, fila,
                 imagen->ancho, alto_area, area_total, area_cuenta.size(), area_lejos,
                 100.0 * double(area_lejos) / double(area_total), area_cero,
                 100.0 * double(area_cero) / double(area_total),
                 area_total - area_lejos - area_cero,
-                100.0 * double(area_total - area_lejos - area_cero) / double(area_total));
+                100.0 * double(area_total - area_lejos - area_cero) / double(area_total), area_hash);
     DestruirLectura(lectura);
     // The diagnostic flushes the GPU, which is a frame-long stall. It is only for measurement.
     if (volcados_profundidad_++ == 0) {
