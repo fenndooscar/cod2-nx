@@ -108,17 +108,32 @@ the 1.0 the buffer held, the quad would have been rejected, and the buffer would
 
 ### Next step
 
-**Support `k_32_FLOAT` (format 14) as a colour render target**, so the game's own depth writes actually run.
-The SDK maps it to `VK_FORMAT_R32_SFLOAT`. The gate to open is in `app/src/cod2_nativo_dibujos.cpp` in
-`Dibujar`, where the loop over the four colour targets rejects any `formato` other than `k_8_8_8_8` and
-`k_8_8_8_8_GAMMA` (`Rechazar(200 + formato, ...)`). Note the EDRAM aliasing: base 0x260 is both the
-`8_8_8_8` colour target and this `32_FLOAT` one, and the port keeps them as separate `VkImage`s, so the
-aliasing has to be decided deliberately (they are the same memory on the console, used in different passes).
+**The black scene is closed.** Two changes, both in the tree and both measured in a mission:
 
-Everything else follows from that. When the format-14 draws run, check with the depth dump
-(`cod2_nativo_volcar_profundidad_s`) that the buffer stops being 0.0 over the render area, and with
-`--cod2_nativo_estadisticas_pipeline=true` that the scene pass shades millions of fragments with the game's own
-`LESS_OR_EQUAL`.
+1. `cod2_nativo_formatos_extra` (new, default **true**): the loop over the four colour targets in `Dibujar`
+   accepts `k_32_FLOAT` (format 14) as well. That is the colour target of the game's own linear-depth
+   pre-pass (636,168 draws per run, `RB_DEPTHCONTROL 0x00700736`, writing the real depth at base 0x530), and
+   rejecting it left the scene's depth with no writers. The dump after the pre-pass goes from **1 distinct
+   value** (all 1.0) to **132,884**.
+2. `cod2_nativo_profundidad_por_fotograma` now defaults to **true**: the scene's depth is cleared to 1.0
+   once per frame instead of once per image. Accepting the pre-pass alone is *not* enough — the image stays a
+   flat plane of sky colour and the diagnostic mosaic is identical with the poison quad on and off. With the
+   per-frame clear the raw capture goes from **95.9 % of its pixels being exactly (155,152,152)** to a real
+   3D scene, and the scene pass from 0.67-0.87 M fragments per frame to 2.72-6.52 M.
+
+The old note in the cvar's comment ("a per-frame clear makes you see through the walls") was measured while
+the pre-pass was still being rejected, so it is now wrong and was rewritten.
+
+### What is still open
+
+- **The full-screen quad** (VS n353 / PS n620, 6 indices, viewport 1280x720, zfunc 3, colour mask F) writes
+  z = 0.0 over the 1280x720 area at the start of the pass. With the per-frame clear on it no longer changes
+  the image (`cod2_nativo_sin_z_quad_escena` on/off gives the same capture), but nobody has explained what it
+  is for. It may be the game's own depth reset translated wrong (a "far" write the port turns into 0.0).
+- **The linear depth has no reader in the port.** Nothing samples base 0x260 as a 32-bit float, and the
+  game's resolve of that address is still rejected with cause 114 (the copy's source format is 14).
+- **Correctness of the depth order** is not proven yet, only that the image is no longer flat: no test has
+  looked for see-through walls, flicker or z-fighting yet.
 
 ### Ground rules
 

@@ -638,17 +638,16 @@ REXCVAR_DEFINE_BOOL(cod2_nativo_prueba_z_no_igual, false, "COD2",
  * (cod2_nativo_destinos.cpp, Preparar) and the log confirmed it happened, and the scene stayed black. So the
  * value has to be written on the pass, which is the only moment nothing can undo.
  *
- * WHY NOT EVERY FRAME. Measured too: with a clear per frame the scene comes out (10.46 M fragments, 255
- * draws) but the image is wrong in a specific way - you see through walls and what is right in front of the
- * camera is missing. The reason is in the draw trace: of the scene's draws only one in six carries z_write
- * (00700736); the rest are 00700732 (test, no write) or 00700730 (no depth at all). Those do not build the
- * depth, they consume it, and they are meant to consume what the previous frame left. Clearing every frame
- * resets them to "far", every one of them passes the test, and the scene is painted in submission order
- * instead of depth order.
+ * WHY NOT EVERY FRAME, WITH THIS SETTING. An earlier measurement said a clear per frame left the image
+ * wrong ("you see through walls"): it was taken while the port was rejecting the game's own depth pre-pass,
+ * so a clear left the buffer with no writer and every test-only draw passed. That pre-pass is accepted now
+ * (cod2_nativo_formatos_extra) and the per-frame clear is what closes the image, so it is the default:
+ * cod2_nativo_profundidad_por_fotograma, which repeats this clear on every frame. This cvar keeps the
+ * once-per-image clear for the case where the per-frame one is switched off.
  *
- * WHAT THIS DOES. Each depth image is cleared to "far" (1.0, stencil 0) once, on its first pass, and from then
- * on it behaves like the persistent EDRAM the game expects. The shadow map is excluded: the game clears it
- * itself and its second pass reads what the first one wrote.
+ * WHAT THIS DOES. Each depth image is cleared to "far" (1.0, stencil 0) once, on its first pass, and again
+ * every frame with cod2_nativo_profundidad_por_fotograma (the default). The shadow map is excluded: the game
+ * clears it itself and its second pass reads what the first one wrote.
  */
 REXCVAR_DEFINE_BOOL(cod2_nativo_profundidad_inicial, true, "COD2",
                     "Renderizador nativo (13/10): borra a 'lejos' (1.0, estencil 0) la profundidad de cada "
@@ -695,17 +694,90 @@ REXCVAR_DEFINE_BOOL(cod2_nativo_sin_z_quad_escena, false, "COD2",
                     "vertices) y deja todo lo demas igual. Si con esto aparece la escena, ese quad es lo que deja "
                     "el bufer en 0.0 y rechaza todo lo demas. ROMPE LA IMAGEN: solo para medir")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+/*
+ * The game's linear-depth pre-pass, and the colour format it was hidden behind.
+ *
+ * THE FAILURE. With this off, the scene pass shades 0.00 M fragments per frame while the passes without a
+ * depth attachment shade 0.70 M: the 3D scene never reaches the screen. The port initialises the scene's
+ * depth to 1.0 ("far") on its first pass and, measured in a mission, the whole 1280x720 render area is 0.0
+ * right after that pass (cod2_nativo_volcar_profundidad_s). Forcing depthCompareOp to NOT_EQUAL brings the
+ * scene back (8.83 M fragments), so the buffer's content, not the geometry, is what rejects everything.
+ *
+ * THE EVIDENCE. Instrumenting every accepted draw with z_write in a pass of 1280 or more finds exactly one
+ * per frame - a full-screen quad, VS n353 / PS n620, 6 indices, viewport 1280x720 - and it is the one that
+ * leaves 0.0 over the render area. The draws that DO carry the scene's own depth write
+ * (RB_DEPTHCONTROL 0x00700736: z_enable 1, z_write 1, zfunc 3, into RB_DEPTH_INFO base 0x530) never reach
+ * the GPU: they ask for a colour target at RB_COLOR_INFO 0x000E0260 - EDRAM base 0x260, format 14 =
+ * k_32_FLOAT, pitch 1280, RB_COLOR_MASK 0xF - and the loop over the four colour targets accepted only
+ * k_8_8_8_8 and k_8_8_8_8_GAMMA, so it rejected every one of them (636,168 draws in one run; cause 214 =
+ * 200 + 14 was the only rejection cause that ever fired). That is Call of Duty's linear-depth pre-pass: view
+ * depth as a float into an R32F target, plus the hardware depth write into 0x530. Rejecting it left the
+ * scene's depth buffer with a single writer per frame - the quad - and that quad fills it with 0.0.
+ *
+ * WHAT THIS DOES. It accepts k_32_FLOAT in that loop as well (the guest format is only part of the render
+ * target's key, ObtenerDestino, so the port gives this one its own 1280x1280 RGBA8 image at base 0x260,
+ * kept apart from the scene's colour image at the same base - on the console one address is both). Nothing
+ * else changes: the depth attachment, the depth test, the clears and the pipelines are the ones the port
+ * already had. The linear depth itself still has no reader in the port: the game's resolve of that address
+ * is a copy packet whose SOURCE format is 14 and it is still rejected, with the copy's own cause 114.
+ *
+ * WHAT IT IS NOT, ON ITS OWN. Accepting the format is necessary and not sufficient: measured with this on
+ * and the depth still cleared once per image, the scene stays a flat plane of sky colour, and the
+ * diagnostic mosaic is identical byte for byte with the poison quad on and off. What closes the image is
+ * clearing the scene's depth once per frame (cod2_nativo_profundidad_por_fotograma), which is what the
+ * pre-pass needs to rebuild the depth every frame instead of converging onto the previous frame's.
+ *
+ * OFF WITHOUT A REBUILD: cod2_nativo_formatos_extra = false restores the old behaviour exactly (the
+ * k_32_FLOAT draws rejected again, cause 214 again).
+ */
+REXCVAR_DEFINE_BOOL(cod2_nativo_formatos_extra, true, "COD2",
+                    "Renderizador nativo (13/10): acepta k_32_FLOAT (formato 14) como destino de color, que es "
+                    "el que lleva el pre-pase de profundidad lineal del juego (636.168 dibujos por partida, con "
+                    "z_write 1 y zfunc 3 sobre la profundidad de la escena en la base 530). Sin el, esos dibujos "
+                    "se rechazan (causa 214) y la profundidad de la escena se queda sin escritores. Con false "
+                    "vuelve el comportamiento anterior")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_INT32(cod2_nativo_volcar_profundidad_s, 0, "COD2",
                      "Renderizador nativo (diagnostico, 13/10): con N > 0, cada 400 fotogramas lee de vuelta la "
                      "profundidad de la escena antes y despues de un pase y escribe en el registro cuantos "
                      "texeles hay de cada valor de 32 bits. D24S8: 0x00FFFFFF es profundidad 1.0 y "
                      "0x00000000 es 0.0. Cuesta un paron por volcado: solo para medir");
-REXCVAR_DEFINE_BOOL(cod2_nativo_profundidad_por_fotograma, false, "COD2",
-                    "Renderizador nativo (prueba, 13/10): borra la profundidad de la escena en CADA fotograma en "
-                    "vez de solo en el primer pase de la imagen. Quita la negrura absoluta (medido: 10.46 M "
-                    "fragmentos y 255 dibujos) pero deja mal el orden de profundidad, porque la mayoria de los "
-                    "dibujos de la escena llevan z_write = 0 y en la consola convergen sobre la profundidad que "
-                    "dejo el fotograma anterior: se ve a traves de las paredes. Solo para medir")
+/*
+ * The scene's depth has to be reset once per frame, and the game does not do it.
+ *
+ * THE MEASUREMENT. Accepting the game's own depth pre-pass (cod2_nativo_formatos_extra) makes the buffer
+ * hold real geometry depth (the dump goes from 1 distinct value, all 1.0, to 132,884), and that alone leaves
+ * the image as a flat plane of sky colour with only the pieces of geometry close enough to beat the stale
+ * depth. With this on - the scene's depth cleared to 1.0 once per frame instead of once per image - the raw
+ * capture goes from 95.9 % of its pixels being exactly (155, 152, 152) to a real three-dimensional scene,
+ * and the scene pass from 0.67-0.87 M fragments per frame to 2.72-6.30 M. The A/B is the capture, not the
+ * counter: it is the same mission, the same 30+ draws per scene pass.
+ *
+ * WHY THE GAME DOES NOT DO IT ITSELF. In a whole run the guest sends no depth clear for the scene (only the
+ * shadow map's), and the port's initialisation of a new depth image happens once, on its first pass. From
+ * then on the buffer only ever gets closer, because the game's comparison is LESS_OR_EQUAL: whatever the
+ * previous frame left rejects the current frame's geometry, and a rejected fragment writes no depth either,
+ * so it never recovers. That is exactly the symptom: a wall of sky colour with a few objects close enough
+ * to survive.
+ *
+ * WHY IT IS NOT HARMFUL NOW. The earlier note here said a per-frame clear made the image wrong ("you see
+ * through the walls"), because most of the scene's draws carry z_write = 0 and were believed to converge
+ * onto the previous frame's depth. That was measured while the depth pre-pass was being rejected: with no
+ * writer per frame, a clear left the buffer empty and every test-only draw passed. With the pre-pass
+ * accepted, the depth is rebuilt from scratch every frame, so the clear is what the game expects and the
+ * occlusion is correct.
+ *
+ * OFF WITHOUT A REBUILD: cod2_nativo_profundidad_por_fotograma = false goes back to clearing once per
+ * image, which brings the flat plane back.
+ */
+REXCVAR_DEFINE_BOOL(cod2_nativo_profundidad_por_fotograma, true, "COD2",
+                    "Renderizador nativo (14/10): borra a 'lejos' (1.0, estencil 0) la profundidad de la escena "
+                    "en cada fotograma, en vez de solo en el primer pase de la imagen. El juego no manda nunca "
+                    "ese clear y su comparacion es LESS_OR_EQUAL, asi que sin esto el bufer solo se acerca con "
+                    "los fotogramas y acaba rechazando la geometria del actual: medido, la imagen se queda en un "
+                    "plano de color cielo con trozos de geometria muy cercana. Con el pre-pase de profundidad "
+                    "aceptado (cod2_nativo_formatos_extra) el fotograma reconstruye la profundidad entera, que es "
+                    "lo que el juego espera. false = se borra una sola vez por imagen (imagen plana)")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_INT32(cod2_nativo_resplandor_suave_alternar_s, 0, "COD2",
                      "Renderizador nativo (prueba, build 150): con N > 0 va rotando el resplandor del cielo original, "
@@ -2504,8 +2576,25 @@ class DibujosVulkanImpl final : public DibujosVulkan {
       }
       const uint32_t info = r[kInfoColor[i]];
       const uint32_t formato = (info >> 16) & 0xF;
-      if (formato != uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8) &&
-          formato != uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA)) {
+      /*
+       * The colour formats the port accepts as a render target.
+       *
+       * k_8_8_8_8 and k_8_8_8_8_GAMMA are the scene's own colour, the resolved textures and everything the
+       * HUD draws on. k_32_FLOAT is the game's linear-depth pre-pass (cod2_nativo_formatos_extra, above):
+       * 636,168 draws per run asked for it and every one of them was rejected here, which is why the scene's
+       * depth had no writers left.
+       *
+       * The guest format is only part of the render target's key (ObtenerDestino, cod2_nativo_destinos.cpp),
+       * so this creates a second image for base 0x260 with the port's own VkFormat (kFormatoColor, RGBA8) and
+       * the pre-pass's colour output lands there. It has no reader in the port - nothing samples that base as
+       * a 32-bit float - so what it holds does not matter; what matters is that the pass runs and writes the
+       * hardware depth at 0x530.
+       */
+      const bool formato_conocido =
+          formato == uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8) ||
+          formato == uint32_t(xenos::ColorRenderTargetFormat::k_8_8_8_8_GAMMA) ||
+          (formatos_extra_ && formato == uint32_t(xenos::ColorRenderTargetFormat::k_32_FLOAT));
+      if (!formato_conocido) {
         // TEMPORARY (causa 214): who asks for an unsupported colour format, and for what.
         if (formato_temporal_ != formato) {
           formato_temporal_ = formato;
@@ -12565,6 +12654,8 @@ class DibujosVulkanImpl final : public DibujosVulkan {
   static constexpr uint32_t kQuadEscenaPs = 620;
   const bool sin_z_quad_escena_ = REXCVAR_GET(cod2_nativo_sin_z_quad_escena);
   uint64_t quad_escena_sin_z_ = 0;
+  // cod2_nativo_formatos_extra: k_32_FLOAT accepted as a colour render target. Init-only, so it is read once.
+  const bool formatos_extra_ = REXCVAR_GET(cod2_nativo_formatos_extra);
   std::unordered_set<uint64_t> rechazos_con_profundidad_;  // TEMPORARY (black scene)
   // Vertex copies on a separate thread (EncolarCopia). Power-of-2 capacity.
   const bool copias_activas_ = REXCVAR_GET(cod2_nativo_subidas_hilo);
