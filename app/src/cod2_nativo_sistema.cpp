@@ -1878,6 +1878,28 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
       case xenos::PM4_INTERRUPT: {
         if (palabras < 1) break;
         AnotarVallaCopias();  // Measurement only
+        /*
+         * An interrupt is the OTHER way the game can learn that the GPU consumed the ring, and it is the one
+         * the sync counter used to miss. Measured: with only WAIT_REG_MEM counted, a two-minute mission gave
+         * 411 copies out of 152,654 whose source bytes had already been rewritten between the ring recording
+         * the draw and the copy thread reading it (cod2_nativo_dedupe_paranoico), i.e. the port was uploading
+         * geometry the console never had. The guest treats an interrupt as "everything up to here is done", so
+         * from here on a vertex range it already referenced may be rewritten.
+         *
+         * PM4_INTERRUPT is raised by the GPU when it reaches that point of the ring, which is exactly the
+         * synchronisation the dedupe table's exactness rests on. Bumping the same counter is what makes
+         * Olvidar() happen here too.
+         */
+        g_sincronizaciones_anillo.fetch_add(1, std::memory_order_relaxed);
+        /*
+         * The guest is about to run (ExecuteInterrupt calls its callback on THIS thread), so this is the other
+         * place where it can rewrite a vertex range the port has referenced and not copied yet. Same reasoning
+         * and same measurement as the WAIT_REG_MEM case below: 411 of 152,654 copies in one mission were
+         * reading bytes the ring had not seen.
+         */
+        if (destinos_) {
+          destinos_->EsperarSubidas();
+        }
         const uint32_t cpus = datos.Leer();
         for (uint32_t cpu = 0; cpu < 6; ++cpu) {
           if (cpus & (1u << cpu)) {
@@ -1918,6 +1940,34 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
         const auto inicio_regmem = Reloj::now();  // for the "[tiron]" line
         const auto limite = inicio_regmem + kEsperaRegMemMax;
         uint32_t vueltas = 0;
+        /*
+         * THE DEFERRED VERTEX COPIES HAVE TO BE DONE *BEFORE* THIS WAIT IS ANSWERED.
+         *
+         * What the guest is about to do. This packet is D3D waiting for the GPU to have consumed the ring up
+         * to here. The moment the poll below succeeds, the game is free to rewrite every vertex range it
+         * referenced: on the console the GPU has executed those draws, so it already read those bytes. That is
+         * the whole reason the upload deduplication is exact rather than a gamble
+         * (cod2_nativo_vertices_dedupe.h).
+         *
+         * What the port was doing. The copy of a vertex range is queued when the draw is recorded and made
+         * later, by the copy thread. Nothing forced those copies to be finished before the wait was answered:
+         * EsperarSubidas ran at the end of the ring batch (BucleAnillo), and this packet is processed inside
+         * that batch. So the guest could be released, rewrite the range, and only then would the copy thread
+         * read it - taking vertices the console never had, which is a mesh drawn with another mesh's
+         * positions: the large flat untextured polygons reported for two frames while the player or an NPC
+         * moves.
+         *
+         * Measured with cod2_nativo_dedupe_paranoico, which re-hashes the source inside CopiarVertices: 411
+         * copies out of 152,654 in one mission had bytes different from the ones the ring saw when it recorded
+         * the draw. Nothing before this measurement could see it, because the deduplication lookup (at
+         * recording time) is close enough to the guest that it never mismatched.
+         *
+         * Cost: only pays when there are copies pending, and it is exactly the wait the correctness argument
+         * needs. It is the same call the end of the batch already makes.
+         */
+        if (destinos_) {
+          destinos_->EsperarSubidas();
+        }
         for (;;) {
           if (!(info & 0x10) && sondeo == rex::graphics::XE_GPU_REG_COHER_STATUS_HOST &&
               (Registro(sondeo) & UINT32_C(0x80000000))) {
