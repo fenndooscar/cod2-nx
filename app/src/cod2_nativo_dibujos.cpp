@@ -1198,12 +1198,25 @@ REXCVAR_DEFINE_BOOL(cod2_nativo_dedupe_vertices, true, "COD2",
  * leave it on for a session in which the artefact appears, then turn it off.
  *
  * OFF WITHOUT A REBUILD: cod2_nativo_dedupe_paranoico = false (the default).
+ *
+ * TWO CHECKS, ONE CVAR. The cvar compares the content of a range at the two moments it can be wrong:
+ *
+ *   - at the dedupe lookup (AvisarChoqueDedupe): the table claims the range is already in the upload buffer,
+ *     and the fingerprint proves it is not the same bytes any more. That is the guest rewriting a range
+ *     between two draws of the same frame, i.e. a synchronisation the port is not seeing. The hit is refused
+ *     and the range is copied, so that frame comes out CORRECT.
+ *   - at the copy itself (CopiarVertices, g_copias_tarde_): the copy runs later and on another thread, and by
+ *     then the source may have been rewritten. Here nothing can be repaired - the old bytes are gone - and
+ *     the line names the address. This is the one that costs a second hash, and it is the reason the copy
+ *     thread's share of the suspicion can be measured at all.
+ *
+ * The report line for the second one is "C6 copia de vertices con huella".
  */
 REXCVAR_DEFINE_BOOL(cod2_nativo_dedupe_paranoico, false, "COD2",
                     "Renderizador nativo (prueba): comprueba con el contenido (XXH3) que la tabla de "
-                    "deduplicacion de vertices no sirve un rango que el juego ha reescrito. Cada diferencia es "
-                    "un fallo del modelo 'entre dos dibujos del fotograma el invitado no reescribe': se anota "
-                    "con direccion y tamano, y esa copia se hace (el fotograma sale bien). Cuesta 1-3 % de un "
+                    "deduplicacion de vertices no sirve un rango que el juego ha reescrito, y que una copia no "
+                    "se hace con bytes que el invitado ya reescribio. Cada diferencia se anota con direccion y "
+                    "tamano; en el primer caso la copia se hace (el fotograma sale bien). Cuesta 1-3 % de un "
                     "nucleo. Solo pruebas");
 
 /*
@@ -1719,14 +1732,58 @@ constexpr size_t kCopiasPorTrozo = 16;
 // before it starts helping. In the menus that is a few seconds.
 constexpr uint64_t kEsperasCopiasMirando = 512;
 
-// One guest vertex binding into the upload buffer, as host words with the fetch constant's byte order.
-// Done by the ring thread or by the copy thread (cod2_nativo_subidas_hilo).
+/*
+ * cod2_nativo_dedupe_paranoico counters for the copy-time check (see CopiarVertices). File scope because the
+ * copy runs on the copy thread and on the ring, and the report is written by the ring.
+ */
+struct CopiasTarde {
+  std::atomic<uint64_t> cambios{0};   // copies whose source bytes changed between recording and copying
+  std::atomic<uint64_t> avisos{0};    // of those, how many were logged
+  std::atomic<uint64_t> copias{0};    // copies checked
+  std::atomic<uint64_t> ns_hash{0};   // time spent hashing the source, for the report
+};
+CopiasTarde g_copias_tarde_;
+
+/*
+ * One guest vertex binding into the upload buffer, as host words with the fetch constant's byte order.
+ * Done by the ring thread or by the copy thread (cod2_nativo_subidas_hilo).
+ */
 struct TrabajoCopia {
   const uint8_t* origen = nullptr;
   uint8_t* destino = nullptr;
   uint32_t palabras = 0;
   xenos::Endian orden = xenos::Endian::kNone;
+  /*
+   * cod2_nativo_dedupe_paranoico: the fingerprint of the source bytes at the moment the ring recorded the
+   * draw. The copy happens later and on another thread, so by the time it runs the guest may already have
+   * rewritten that range (which on the console it could only do after synchronising with the GPU, i.e. after
+   * the draw had been executed with the old bytes). If it has, this copy is taking a moment of guest memory
+   * the console never saw: wrong vertices, huge stretched triangles, and it goes away on its own. 0 = no
+   * check.
+   */
+  uint64_t huella = 0;
 };
+
+// Copies of one interval, for the C6 report (see CopiasTarde).
+void InformeCopiasTarde() {
+  static uint64_t cambios_previos = 0, copias_previas = 0, ns_previos = 0;
+  const uint64_t cambios = g_copias_tarde_.cambios.load(std::memory_order_relaxed);
+  const uint64_t copias = g_copias_tarde_.copias.load(std::memory_order_relaxed);
+  const uint64_t ns = g_copias_tarde_.ns_hash.load(std::memory_order_relaxed);
+  const uint64_t d_cambios = cambios - cambios_previos;
+  const uint64_t d_copias = copias - copias_previas;
+  const uint64_t d_ns = ns - ns_previos;
+  cambios_previos = cambios;
+  copias_previas = copias;
+  ns_previos = ns;
+  if (!d_copias && !cambios) {
+    return;
+  }
+  REXLOG_INFO("[nativo] C6 copia de vertices con huella (cod2_nativo_dedupe_paranoico): {} copias "
+              "comprobadas, {} con los bytes cambiados desde que el anillo grabo el dibujo ({} desde el "
+              "arranque); {:.2f} ms por informe comprobando",
+              d_copias, d_cambios, cambios, double(d_ns) / 1e6);
+}
 
 void CopiarVertices(const TrabajoCopia& t) {
   // The fields go into local variables: the destination is a byte pointer and, as far as the compiler
@@ -1736,6 +1793,35 @@ void CopiarVertices(const TrabajoCopia& t) {
   uint8_t* const destino = t.destino;
   const uint32_t palabras = t.palabras;
   const xenos::Endian orden = t.orden;
+  /*
+   * cod2_nativo_dedupe_paranoico: the bytes are checked against the ones the ring saw when it recorded the
+   * draw, BEFORE they are copied. This is a different suspicion from the dedupe table's (see Buscar in
+   * cod2_nativo_vertices_dedupe.h): the copy is made later and on another thread, and the console's contract
+   * is that the game cannot rewrite this range until it has synchronised with the GPU, i.e. until the draw
+   * has already executed with these bytes. If the guest has rewritten it by now, this copy takes a moment of
+   * guest memory the console never saw - a mesh's indices against another mesh's positions, which is the
+   * reported artefact. Nothing can be repaired here (the old bytes are gone); what the line names is the
+   * address and the draw, which is the finding.
+   */
+  if (t.huella != 0) {
+    const auto antes = std::chrono::steady_clock::now();
+    // | 1 on both sides: the recorded value used 0 as "no check", and XXH3 can legitimately be even (or 0).
+    const bool cambio = (XXH3_64bits(origen, size_t(palabras) * 4) | 1) != t.huella;
+    g_copias_tarde_.ns_hash.fetch_add(
+        uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                     std::chrono::steady_clock::now() - antes).count()),
+        std::memory_order_relaxed);
+    g_copias_tarde_.copias.fetch_add(1, std::memory_order_relaxed);
+    if (cambio) {
+      g_copias_tarde_.cambios.fetch_add(1, std::memory_order_relaxed);
+      if (g_copias_tarde_.avisos.fetch_add(1, std::memory_order_relaxed) < 40) {
+        REXLOG_ERROR("[nativo] C6 copia de vertices: los bytes de {:p} ({} palabras) YA NO SON los que el "
+                     "anillo vio al grabar el dibujo: la copia llega tarde y esta geometria la consola nunca "
+                     "usa",
+                     static_cast<const void*>(origen), palabras);
+      }
+    }
+  }
   if (orden == xenos::Endian::k8in32) {
     for (uint32_t i = 0; i < palabras; ++i) {
       uint32_t v;
@@ -3484,7 +3570,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
       } else {
         Reservar(origen.bytes, 4, offset);
       }
-      const TrabajoCopia trabajo{origen.datos, subida_datos_ + offset, origen.bytes / 4, origen.orden};
+      const TrabajoCopia trabajo{origen.datos, subida_datos_ + offset, origen.bytes / 4, origen.orden, huella};
       if (!copias_activas_ || !EncolarCopia(trabajo)) {
         CopiarVertices(trabajo);
       }
@@ -8093,6 +8179,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
           double(c.ns_espera_peor) / 1e6, c.comprobadas, copias_diferencias_, NombreFaseCopias());
     }
     copias_inf_ = InformeCopiasCifras{};
+    InformeCopiasTarde();
   }
 
   // The per-fetch-constant sampler table, every 10 s: hits, and misses by cause.
