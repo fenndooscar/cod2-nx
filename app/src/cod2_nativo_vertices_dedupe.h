@@ -114,8 +114,21 @@ class DedupeVertices {
   // is stored when recording and compared when looking up; on a mismatch it is counted in
   // discrepancias() and false is returned (the data is copied as usual). It proves in a real
   // race that deduplication never serves stale data, without risking a single pixel.
+  //
+  // choque: filled only when the paranoid mode finds a mismatch, for the caller's log. That
+  // mismatch is the finding: it means the guest rewrote a range the table still considered
+  // reusable, i.e. the events that clear the table (Olvidar) are not all of the events the game
+  // can see as "the GPU has consumed that draw". The copy that follows repairs the frame, so a
+  // hit both proves the cause and removes the artefact from that frame.
+  struct Choque {
+    uint64_t direccion = 0;
+    uint64_t bytes = 0;
+    uint64_t offset = 0;
+    uint64_t guardada = 0;
+    uint64_t vista = 0;
+  };
   bool Buscar(uint64_t direccion, uint32_t bytes, uint32_t orden, uint64_t& offset,
-              uint64_t huella = 0) {
+              uint64_t huella = 0, Choque* choque = nullptr) {
     ++consultas_;
     const uint64_t clave = Clave(direccion, orden);
     const Entrada& e = tabla_[Indice(clave, bytes)];
@@ -125,6 +138,9 @@ class DedupeVertices {
     }
     if (huella != 0 && e.huella != huella) {
       ++discrepancias_;
+      if (choque) {
+        *choque = Choque{direccion, bytes, e.offset, e.huella, huella};
+      }
       return false;
     }
     ++aciertos_;

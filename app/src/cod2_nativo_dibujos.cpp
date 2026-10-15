@@ -1175,6 +1175,36 @@ REXCVAR_DEFINE_INT32(cod2_nativo_prueba_mip_puntual_alternar_s, 0, "COD2",
 REXCVAR_DEFINE_BOOL(cod2_nativo_dedupe_vertices, true, "COD2",
                     "Renderizador nativo (21/09): si dos dibujos del mismo fotograma piden el mismo rango de "
                     "vertices, se sube una sola vez. El informe C6 anota aciertos y MB ahorrados");
+/*
+ * Proves that the vertex deduplication never serves a range whose bytes have changed.
+ *
+ * WHY IT IS NEEDED. The visible artefact (large flat untextured triangles that flash for a few frames while
+ * the player or an NPC moves, and then go away on their own) is what wrong vertex bytes look like: a mesh's
+ * indices against the positions of a different mesh. The dedupe table is the only place in the port that can
+ * put bytes in front of a draw without copying them, and it is exact by an argument, not by a check: between
+ * two draws of the same frame, with no synchronisation in between, the game cannot legally rewrite a range it
+ * has already referenced. The argument holds only if the port sees every synchronisation the game can see, so
+ * the one place it is tested is WAIT_REG_MEM (cod2_nativo_sistema.cpp, g_sincronizaciones_anillo). If the game
+ * has another way to learn that the GPU consumed a draw - an interrupt, a swapped EDRAM buffer, a fence the
+ * port answers from a counter - then a stale hit is possible and this is where it would show.
+ *
+ * WHAT IT DOES. Every lookup is also given the XXH3 of the bytes the draw is asking for, and the fingerprint
+ * stored when the copy was recorded is compared with it. On a mismatch the model is wrong: the hit is refused,
+ * the range is copied normally (so that frame is CORRECT, not merely diagnosed) and a line says which address
+ * and how many bytes.
+ *
+ * COST. Measured at the ring's real traffic (~300 MB/s of vertex bytes) XXH3 at 15-20 GB/s is 1-3 % of one
+ * core, and the C6 report's "copiando vertices" line shows the total. It is a diagnostic, not a default:
+ * leave it on for a session in which the artefact appears, then turn it off.
+ *
+ * OFF WITHOUT A REBUILD: cod2_nativo_dedupe_paranoico = false (the default).
+ */
+REXCVAR_DEFINE_BOOL(cod2_nativo_dedupe_paranoico, false, "COD2",
+                    "Renderizador nativo (prueba): comprueba con el contenido (XXH3) que la tabla de "
+                    "deduplicacion de vertices no sirve un rango que el juego ha reescrito. Cada diferencia es "
+                    "un fallo del modelo 'entre dos dibujos del fotograma el invitado no reescribe': se anota "
+                    "con direccion y tamano, y esa copia se hace (el fotograma sale bien). Cuesta 1-3 % de un "
+                    "nucleo. Solo pruebas");
 
 /*
  * No vkCmdBindVertexBuffers in single-binding draws.
@@ -3429,12 +3459,24 @@ class DibujosVulkanImpl final : public DibujosVulkan {
         AnotarVerticesRepetidos(origen.direccion, origen.bytes, uint32_t(origen.orden), origen.datos);
       }
       VkDeviceSize offset;
+      // cod2_nativo_dedupe_paranoico: the content fingerprint of the range, to prove that a hit is
+      // serving the bytes this draw asked for. See the cvar's comment: it is the instrument, and when
+      // it fires the copy below repairs the frame.
+      uint64_t huella = 0;
+      if (dedupe_paranoico_) {
+        huella = XXH3_64bits(origen.datos, origen.bytes) | 1;  // 0 means "no check"
+      }
       // If this same range was already copied in this frame, its place in the upload buffer is reused and
       // nothing is copied. See cod2_nativo_vertices_dedupe.h.
+      DedupeVertices::Choque choque;
       if (dedupe_activo_ &&
-          dedupe_.Buscar(origen.direccion, origen.bytes, uint32_t(origen.orden), offset)) {
+          dedupe_.Buscar(origen.direccion, origen.bytes, uint32_t(origen.orden), offset, huella,
+                         dedupe_paranoico_ ? &choque : nullptr)) {
         offsets_vertices[b] = offset;
         continue;
+      }
+      if (dedupe_paranoico_ && choque.vista != 0) {
+        AvisarChoqueDedupe(choque, p, ps);
       }
       // With a single binding, at a multiple of its stride (cod2_nativo_vertices_base_cero).
       if (vertices_base_cero_ && entrada->enlaces.size() == 1) {
@@ -3449,7 +3491,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
       bytes_vertices_ += origen.bytes;
       offsets_vertices[b] = offset;
       if (dedupe_activo_) {
-        dedupe_.Anotar(origen.direccion, origen.bytes, uint32_t(origen.orden), offset);
+        dedupe_.Anotar(origen.direccion, origen.bytes, uint32_t(origen.orden), offset, huella);
       }
     }
     if (cronometrar_) {
@@ -5464,6 +5506,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     diag_omitir_ps_texto_ = REXCVAR_GET(cod2_nativo_diag_omitir_ps);
     diag_vertices_repetidos_ = REXCVAR_GET(cod2_nativo_diag_vertices_repetidos);
     dedupe_activo_ = REXCVAR_GET(cod2_nativo_dedupe_vertices);
+    dedupe_paranoico_ = REXCVAR_GET(cod2_nativo_dedupe_paranoico);
     vertices_base_cero_ = REXCVAR_GET(cod2_nativo_vertices_base_cero) && !vertices_base_cero_apagado_;
     diag_estadisticas_dibujo_ = REXCVAR_GET(cod2_nativo_estadisticas_por_dibujo_s) > 0;
     area_util_ = REXCVAR_GET(cod2_nativo_pase_area_util);
@@ -6184,6 +6227,32 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     if (avisados_.insert(causa).second) {
       REXLOG_WARN("[nativo] C6: {} (causa {})", texto, causa);
     }
+  }
+
+  /*
+   * cod2_nativo_dedupe_paranoico found a stale hit: the range the draw asks for is not the one the table
+   * recorded. The copy that follows makes the frame correct, so this is a message about the MODEL, not about
+   * this frame: what matters is the address and the size. Repeated addresses point at one piece of guest
+   * geometry being rewritten mid-frame (the game reusing a scratch buffer); a spread of addresses points at
+   * the synchronisation the port is missing. Either way it is bounded (8 lines) because the first few name
+   * the pattern and a flood would slow the ring down.
+   */
+  void AvisarChoqueDedupe(const DedupeVertices::Choque& c, const PeticionDibujo& p, const EntradaShader* ps) {
+    ++choques_dedupe_;
+    // Rate limited in TIME, not in count: the artefact is rare and comes minutes apart, so a cap of "the first
+    // eight" can be spent on early noise and lose the ones that matter. One line per half second still shows
+    // the address of the first hit of every burst.
+    const auto ahora = std::chrono::steady_clock::now();
+    if (avisos_choque_dedupe_ >= 40 || ahora - ultimo_aviso_choque_dedupe_ < std::chrono::milliseconds(500)) {
+      return;
+    }
+    ultimo_aviso_choque_dedupe_ = ahora;
+    ++avisos_choque_dedupe_;
+    REXLOG_ERROR("[nativo] C6 dedupe de vertices: el rango {:08X} de {} bytes ya no tiene los bytes que se "
+                 "copiaron (huella guardada {:016X}, la de ahora {:016X}); se copia otra vez. VS n{} PS n{} "
+                 "fotograma {} ({} de estos desde el arranque)",
+                 uint32_t(c.direccion), uint32_t(c.bytes), c.guardada, c.vista, p.vs ? int(p.vs->numero) : -1,
+                 ps ? int(ps->numero) : -1, fotograma_, choques_dedupe_);
   }
 
   // --- Texture binds on a separate thread (cod2_nativo_texturas_enlace_hilo) ----------------------------------
@@ -13857,6 +13926,11 @@ class DibujosVulkanImpl final : public DibujosVulkan {
   DedupeVertices dedupe_;
   bool dedupe_activo_ = true;
   uint32_t dedupe_sinc_vista_ = 0;  // last value seen of g_sincronizaciones_anillo
+  // cod2_nativo_dedupe_paranoico (see the cvar). Read once per frame; the counters for the log.
+  bool dedupe_paranoico_ = false;
+  uint64_t choques_dedupe_ = 0;
+  uint32_t avisos_choque_dedupe_ = 0;
+  std::chrono::steady_clock::time_point ultimo_aviso_choque_dedupe_{};
   std::set<uint64_t> avisos_invtam_resuelta_;  // one trace per size
   bool alternancia_tijera_anotada_ = false;
   std::unordered_map<const EntradaShader*, VkShaderModule> modulos_solo_alfa_;
