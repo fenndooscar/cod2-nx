@@ -1964,10 +1964,13 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
          *
          * Cost: only pays when there are copies pending, and it is exactly the wait the correctness argument
          * needs. It is the same call the end of the batch already makes.
+         *
+         * WHERE, exactly. After the poll, not before it. Both are correct - what releases the guest is the read
+         * pointer write-back at the end of BucleAnillo, which comes after this packet either way - but draining
+         * BEFORE the poll is wrong for a different reason: the condition the poll is testing may be one the ring
+         * itself has to make true by advancing, and stopping the ring first to copy vertices can only delay it.
+         * After the poll, the wait for the copies is a pure backpressure wait, which is what it is.
          */
-        if (destinos_) {
-          destinos_->EsperarSubidas();
-        }
         for (;;) {
           if (!(info & 0x10) && sondeo == rex::graphics::XE_GPU_REG_COHER_STATUS_HOST &&
               (Registro(sondeo) & UINT32_C(0x80000000))) {
@@ -1998,6 +2001,14 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
          */
         g_sincronizaciones_anillo.fetch_add(1, std::memory_order_relaxed);
         cod2::esperas::Sumar(cod2::esperas::kAnilloRegMem, NanosegundosDesde(inicio_regmem));
+        /*
+         * The copies go after the "anillo" measurement on purpose: what that bucket means is the polling of the
+         * GPU condition, and this is a different wait (backpressure from the copy thread). It is counted by its
+         * own counter (g_ns_esperando_copias, "C6 copias de vertices").
+         */
+        if (destinos_) {
+          destinos_->EsperarSubidas();
+        }
         const uint64_t clave_espera = (uint64_t(info & 0x10) << 32) | sondeo;
         if (esperas_.size() < 64 || esperas_.count(clave_espera)) {
           Espera& espera = esperas_[clave_espera];

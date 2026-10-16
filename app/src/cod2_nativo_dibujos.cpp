@@ -1005,10 +1005,27 @@ REXCVAR_DEFINE_BOOL(cod2_nativo_indices_neon, true, "COD2",
                     "Renderizador nativo (26/09, build 187): los indices de 16 bits se copian y se miden (minimo y "
                     "maximo) con NEON, 16 por vuelta. Mismo resultado (se comprueba sola). false = el bucle de siempre")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+/*
+ * The ring copying the vertices itself: A/B measured on the PC, and it stays ON.
+ *
+ * The theory was that the ring should just wait for the copy thread, because the thread has a core of its own
+ * and copying on the ring stops the ring from recording. Measured on the PC in the same mission, same build,
+ * with only this cvar changed:
+ *
+ *   ayuda=false: el anillo ayudo con 0; espera pura 1906-2141 ms por 10 s; 519 de 636 fotogramas en 30-36 ms
+ *                (el anillo pierde el vblank y el fotograma dura dos), ~30 fps
+ *   ayuda=true:  el anillo ayudo con 9629 MB en 1190 ms y espero 264 ms; 900-1000 fotogramas en 15-18 ms, ~95 fps
+ *
+ * That is: the wait is worse than the work. The reason is that the ring's copy rate is far above the thread's
+ * (~8 GB/s against ~2.3 GB/s: the thread does 23010 copies/s of 119 KB each), so a thread that cannot keep up
+ * turns every wait into a lost vblank, while the ring copying in a batch finishes sooner. The console reasoning
+ * (three cores, the thread ready without one) still holds there, and the cvar exists for it.
+ */
 REXCVAR_DEFINE_BOOL(cod2_nativo_subidas_ayuda, true, "COD2",
                     "Renderizador nativo (26/09, build 185): cuando el hilo del anillo tiene que esperar las copias "
                     "de vertices, copia el mismo las que el hilo de copias aun no ha empezado y espera la que este en "
-                    "curso con herencia de prioridad. Mismos datos (se comprueba sola). false = espera como antes")
+                    "curso con herencia de prioridad. Mismos datos (se comprueba sola). Medido en el PC: false cuesta "
+                    "medio fotograma por fotograma (30 fps contra 95), asi que se queda en true")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 REXCVAR_DEFINE_BOOL(cod2_nativo_diag_vacias_grises, false, "COD2",

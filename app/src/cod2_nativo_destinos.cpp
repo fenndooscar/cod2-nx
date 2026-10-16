@@ -611,6 +611,20 @@ REXCVAR_DEFINE_INT32(cod2_nativo_marcas_precisas_alternar_s, 0, "COD2",
 REXCVAR_DEFINE_INT32(cod2_nativo_lecturas_cada, 1, "COD2",
                      "Renderizador nativo: de cada destino se lee y escribe en la memoria del invitado "
                      "una de cada N copias pequenas (1 = todas); el juego las usa para su exposicion");
+/*
+ * The [tiron] lines, and when they are written.
+ *
+ * They were written above 60 ms, which is right for a stutter but blind to the thing the user reports now: the
+ * FPS dropping when the camera pitches, with the frame landing in the 20-30 ms range and never reaching 60.
+ * The three lines say, for the frame they fire on, the ring's whole breakdown (draws, textures, vertex copies,
+ * the wait for the copy thread, the GPU time) and who waited for whom, which is exactly what a frame-time drop
+ * needs in order to be attributed. Lowering the threshold costs one comparison per Swap and one line per slow
+ * frame, so it is a cvar instead of a constant.
+ */
+REXCVAR_DEFINE_INT32(cod2_nativo_tiron_ms, 60, "COD2",
+                     "Renderizador nativo (medida): a partir de cuantos ms de fotograma se escriben las tres "
+                     "lineas [tiron] con el reparto del anillo, las texturas, las copias de vertices y las esperas "
+                     "de ese fotograma. 60 = solo tirones; 20 = tambien las caidas de FPS normales");
 // The Xbox 360 passes the image through the gamma ramp the game loads, and COD2 does not load the identity
 // (measured: [64] = 273 and [128] = 539 in 10 bits, instead of 256 and 513).
 REXCVAR_DEFINE_BOOL(cod2_nativo_rampa_gamma, true, "COD2",
@@ -2015,8 +2029,12 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
          * over 50 ms without a single line. So exactly the most played stretch was a black hole. With 1000 a
          * whole session fits, and since it only writes when there is a stutter it costs nothing in the normal
          * case.
+         *
+         * 20000 and not 1000 now that the threshold is cod2_nativo_tiron_ms: with it at 20 ms a session can
+         * produce thousands of slow frames, and the cap running out in the first minute is the same black hole
+         * again. At the default (60 ms) nothing fires, so the cap is not reached either way.
          */
-        if (ms > 60.0 && avisos_tiron_ < 1000) {
+        if (ms > double(REXCVAR_GET(cod2_nativo_tiron_ms)) && avisos_tiron_ < 20000) {
           ++avisos_tiron_;
           /* gpu_ns_ are raw GPU timestamps: multiply by 1.627 to get real milliseconds (see docs/measuring.md). */
           const double gpu_ms = double(gpu_ns_ - tiron_gpu_ns_) / 1e6 * 1.627;
