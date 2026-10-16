@@ -542,6 +542,9 @@ void Window::OnDpiChanged(UISetupEvent& e, WindowDestructionReceiver& destructio
 void Window::OnMonitorUpdate(MonitorUpdateEvent& e) {
   if (presenter_surface_) {
     presenter_->OnSurfaceMonitorUpdateFromUIThread(e.old_monitor_potentially_disconnected());
+    // The surface may be usable again on the new monitor: retry the connection (the presenter can be left
+    // with no paint requests at all after a failed reconnect - see RetrySurfacePaintConnectionFromUIThread).
+    presenter_->RetrySurfacePaintConnectionFromUIThread();
   }
 }
 
@@ -570,6 +573,13 @@ void Window::OnFocusUpdate(bool new_has_focus, WindowDestructionReceiver& destru
     return;
   }
   has_focus_ = new_has_focus;
+  // Getting the focus back is the moment the picture has to come back: after a swapchain that went outdated
+  // while the window was in the background, the presenter can be left with no paint requests at all, and
+  // nothing else would ask for one (see RetrySurfacePaintConnectionFromUIThread). Before the events, like the
+  // resize path, so the repaint is requested with the connection already updated.
+  if (has_focus_ && presenter_surface_) {
+    presenter_->RetrySurfacePaintConnectionFromUIThread();
+  }
   UISetupEvent e(this);
   if (has_focus_) {
     SendEventToListeners([&e](auto listener) { listener->OnGotFocus(e); }, destruction_receiver);
@@ -612,6 +622,12 @@ void Window::OnMinimized(WindowDestructionReceiver& destruction_receiver) {
 void Window::OnRestored(WindowDestructionReceiver& destruction_receiver) {
   if (!CanSendEventsToListeners()) {
     return;
+  }
+  // The window is on screen again, so the swapchain can be created again: without this the picture stays
+  // frozen after a minimize, because the failed reconnect left the presenter with no paint requests at all
+  // (see RetrySurfacePaintConnectionFromUIThread).
+  if (presenter_surface_) {
+    presenter_->RetrySurfacePaintConnectionFromUIThread();
   }
   UIEvent e(this);
   SendEventToListeners([&e](auto listener) { listener->OnRestored(e); }, destruction_receiver);

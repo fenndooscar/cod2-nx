@@ -541,6 +541,65 @@ void Presenter::OnSurfaceResizeFromUIThread() {
   }
 }
 
+/*
+ * Ask for a paint after a window state change, because the paint path is the only thing that reconnects the
+ * surface and, after a failed reconnect, nothing else would ever ask for one.
+ *
+ * The failure this exists for, as observed and as the log says it. The window is minimized (or the swapchain
+ * goes outdated on its own) and the picture stays frozen forever while the game keeps running at full speed.
+ * One session, one log:
+ *
+ *   12:24:52.651 VulkanPresenter: Presentation to the swapchain image has been dropped as the swapchain or
+ *                the surface has become outdated
+ *   12:24:52.651 Presenter: modo de pintado -> en el hilo de la interfaz, a peticion
+ *   12:24:52.654 Presenter: modo de pintado -> ninguno
+ *   ... 44 minutes with the mode at kNone, the ring at 999.9 ms/s and the frame counter advancing ...
+ *   13:09:30.939 Presenter: modo de pintado -> desde el hilo del juego   <- the window was RESIZED by hand
+ *
+ * What happens in between. vkQueuePresentKHR returning VK_ERROR_OUT_OF_DATE_KHR marks the connection as
+ * kConnectedOutdated. The recovery attempt is in PaintFromUIThread, which reconnects the surface - but a
+ * swapchain cannot be created for a minimized window, so the reconnect fails, the connection is left as
+ * kUnconnectedRetryAtStateChange, and the mode is set to kNone. From kNone, nothing in this class ever asks
+ * for a paint or a reconnect again:
+ *   - RefreshGuestOutput's switch does nothing at all for kNone, so it never requests a repaint;
+ *   - PaintFromUIThread skips GetDesiredPaintModeFromUIThread when the mode is already kNone, so the mode is
+ *     never reconsidered;
+ *   - PaintFromUIThread's own recovery only handled kConnectedOutdated, not the kUnconnectedRetryAtStateChange
+ *     a failed attempt leaves behind, so the retry died with the first failure;
+ *   - UpdateSurfacePaintConnectionFromUIThread(..., update_paint_mode_to_desired = false) deliberately does
+ *     not touch the mode.
+ * The only paths that passed update_paint_mode_to_desired = true were a resize and a new surface, so a RESIZE
+ * was the only thing that ever brought the picture back - exactly what the user reported, and why switching
+ * focus back does nothing.
+ *
+ * And on Windows there is no exposed event to fall back on either: SDL3's Win32 backend paints continuously
+ * and does not synthesize SDL_EVENT_WINDOW_EXPOSED, so the forced paint from it never arrives. The events
+ * that DO arrive are the ones the window forwards here: restored, focus gained, monitor changed.
+ *
+ * What this does NOT do is reconnect the surface itself. It only asks the UI thread for a paint, which is
+ * where the SDK already reconnects (PaintFromUIThread). Measured: doing the reconnect here as well, right
+ * from the window event and on a swapchain that has just been retired, killed the process with a null write
+ * one millisecond later, so the reconnection stays in the single place that was designed for it.
+ */
+void Presenter::RetrySurfacePaintConnectionFromUIThread() {
+  // No intrusive lifetime management must be performed from UI drawers - defer
+  // it if needed.
+  assert_false(is_executing_ui_drawers_);
+
+  if (!surface_) {
+    return;
+  }
+
+  // Let the UI thread take ownership of painting: the connection can only be
+  // updated there, and while the mode is kGuestOutputThreadImmediately the guest
+  // output thread is the one presenting.
+  if (paint_mode_ == PaintMode::kGuestOutputThreadImmediately) {
+    SetPaintModeFromUIThread(PaintMode::kUIThreadOnRequest);
+  }
+
+  RequestPaintOrConnectionRecoveryViaWindow(true);
+}
+
 void Presenter::PaintFromUIThread(bool force_paint) {
   // If there is no surface, this will be a no-op, nothing outdated, nothing to
   // paint. However, an explicit monitor check is needed because UI framerate
@@ -589,10 +648,18 @@ void Presenter::PaintFromUIThread(bool force_paint) {
     if (paint_mode_ == PaintMode::kGuestOutputThreadImmediately) {
       SetPaintModeFromUIThread(PaintMode::kUIThreadOnRequest);
     }
-    // Try to recover from the connection becoming outdated in the previous
-    // paint.
-    if (surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedOutdated) {
-      UpdateSurfacePaintConnectionFromUIThread(nullptr, false);
+    // Try to recover from the connection being broken in the previous paint, or from a reconnect that
+    // failed earlier (kUnconnectedRetryAtStateChange). Both have to be retried here: this is the only place
+    // that can bring the connection back, and after a failed reconnect the paint mode has already been set
+    // to kNone, from which nothing else would ever ask for a paint again - the picture stayed frozen until
+    // the window was resized by hand (measured, see RetrySurfacePaintConnectionFromUIThread).
+    if (surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedOutdated ||
+        surface_paint_connection_state_ ==
+            SurfacePaintConnectionState::kUnconnectedRetryAtStateChange) {
+      // update_paint_mode_to_desired = true: on success the connection is paintable again and the mode has
+      // to be set from it, otherwise the paint below is skipped and the presenter is left in kNone with a
+      // perfectly good swapchain.
+      UpdateSurfacePaintConnectionFromUIThread(nullptr, true);
     }
     // If still paintable or recovered successfully, paint.
     if (surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedPaintable) {
@@ -1528,6 +1595,31 @@ void Presenter::UpdateSurfacePaintConnectionFromUIThread(bool* repaint_needed_ou
           *surface_, surface_width, surface_height,
           surface_paint_connection_state_ == SurfacePaintConnectionState::kConnectedPaintable,
           is_vsync_implicit);
+      /*
+       * One line per connection update, because this is where the freeze was invisible.
+       *
+       * The picture dying after a minimize leaves no trace other than the paint mode going to "ninguno": the
+       * reconnect that failed, and the size the surface reported at that moment, are not in the log anywhere.
+       * With this line the two candidates can be told apart - a surface that reports no usable area (a
+       * minimized window) against a swapchain that cannot be created for it.
+       */
+      {
+        const char* const resultado =
+            connect_result == SurfacePaintConnectResult::kSuccess
+                ? "creada"
+                : (connect_result == SurfacePaintConnectResult::kSuccessUnchanged
+                       ? "sin cambios"
+                       : (connect_result == SurfacePaintConnectResult::kFailure
+                              ? "*** FALLO ***"
+                              : "*** SUPERFICIE INUTILIZABLE ***"));
+        static uint32_t tamano_anterior = 0;
+        if (connect_result != SurfacePaintConnectResult::kSuccessUnchanged ||
+            surface_width != tamano_anterior) {
+          REXLOG_INFO("Presenter: conexion con la superficie {}x{}: {} (reconexion: {})", surface_width,
+                      surface_height, resultado, is_reconnect ? "si" : "no");
+          tamano_anterior = surface_width;
+        }
+      }
       switch (connect_result) {
         case SurfacePaintConnectResult::kSuccess:
           if (repaint_needed_out) {
@@ -1541,7 +1633,22 @@ void Presenter::UpdateSurfacePaintConnectionFromUIThread(bool* repaint_needed_ou
           surface_paint_connection_has_implicit_vsync_ = is_vsync_implicit;
           surface_width_in_paint_connection_ = surface_width;
           surface_height_in_paint_connection_ = surface_height;
-          if (!is_reconnect) {
+          /*
+           * The null check is not optional here, and it is what the crash below was.
+           *
+           * PaintFromUIThread calls this function with repaint_needed_out = nullptr (it paints right away, so
+           * it does not need the flag). Until now that was safe by accident: the only state it retried was
+           * kConnectedOutdated, for which is_reconnect is true, so this branch was never taken. Retrying a
+           * FAILED connection (kUnconnectedRetryAtStateChange) has is_reconnect == false, so it is taken, and
+           * the unguarded store wrote 1 to address 0:
+           *
+           *   VIOLACION DE ACCESO 1: escritura de 0x0000000000000000 en rexruntime.dll+0xDE289
+           *   ... movb $0x1, (%rdi)     <- *repaint_needed_out = true with rdi = 0
+           *
+           * The "reconexion: no" in the connection line one millisecond earlier is the same fact: this is the
+           * first successful connection, not a reconnect.
+           */
+          if (repaint_needed_out && !is_reconnect) {
             *repaint_needed_out = true;
           }
           break;

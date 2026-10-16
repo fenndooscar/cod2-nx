@@ -350,6 +350,11 @@ class Presenter {
   void SetWindowSurfaceFromUIThread(Window* new_window, Surface* new_surface);
   void OnSurfaceMonitorUpdateFromUIThread(bool old_monitor_potentially_disconnected);
   void OnSurfaceResizeFromUIThread();
+  // For any window state change after which the surface may be usable again - restored, focused, moved to
+  // another monitor. Needed because a failed reconnect leaves the presenter in the kNone mode, from which
+  // nothing else asks for a paint or a reconnect, and on Windows SDL never sends the exposed event that
+  // would. See the definition for the measured log.
+  void RetrySurfacePaintConnectionFromUIThread();
 
   // For calling from the platform paint event handler. Refreshes the surface
   // connection if needed, and also paints if possible and if needed (if there
