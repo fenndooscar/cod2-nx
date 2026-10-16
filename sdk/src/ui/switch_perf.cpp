@@ -277,6 +277,10 @@ std::atomic<u32> g_skip_mask{0};
 // twice never measures the same set of modes.
 std::atomic<size_t> g_modo_ab{0};
 
+// Asked for by the port's diagnosis button (RexSwitchPerfInformeYa): write the report now, do not wait for the
+// interval. Consumed by the profiler loop.
+std::atomic<bool> g_informe_ya{false};
+
 extern "C" void RexSwitchPerfToggleAb(void) {
   const bool nuevo = !g_ab_activas.load(std::memory_order_relaxed);
   g_ab_activas.store(nuevo, std::memory_order_relaxed);
@@ -287,6 +291,22 @@ extern "C" void RexSwitchPerfToggleAb(void) {
     g_skip_mask.store(0, std::memory_order_relaxed);
   }
 }
+
+/*
+ * Write the profile report right now instead of waiting for the interval.
+ *
+ * The port's own frame rate diagnosis (app/src/cod2_nativo_sistema.cpp) says whether the wall is the ring
+ * thread, the GPU or the game, and it is asked for with the pad combo L+R+ZR. This is the other half of that
+ * answer, and the reason the combo calls both: the verdict knows nothing about individual threads, while this
+ * report is exactly the per-thread CPU (with the priority and the core of each one), the sampling by pc and,
+ * with perfil_pilas.flag, the stacks of the long frames. Together they say what to change; separately each one
+ * leaves the reader guessing at the part the other has.
+ *
+ * The flag is consumed by the profiler loop, which resets the interval when it writes, so the press also
+ * restarts the accounting: the report is about the seconds since the previous one, not about the whole
+ * session. It is safe from any thread.
+ */
+extern "C" void RexSwitchPerfInformeYa(void) { g_informe_ya.store(true, std::memory_order_relaxed); }
 
 /*
  * Horizon limits how much memory a process may map (LimitableResource_Memory). Our
@@ -994,11 +1014,17 @@ void ProfilerMain(void*) {
     // Once per second, FPS and resolution for the overlay (the profile report runs every 10 s).
     overlay.Paso(now, tick_freq, true);
     const size_t modo = g_modo_ab.load(std::memory_order_relaxed);
-    const u64 intervalo = (g_ab_activas.load(std::memory_order_relaxed) ? kAbReportSeconds
+    /*
+     * The interval is the normal one, or five seconds while the A/B lap rotates, or nothing at all when the
+     * port's diagnosis button asked for the report (RexSwitchPerfInformeYa): that press writes it right here,
+     * so the numbers describe the seconds since the last report rather than the whole session.
+     */
+    const bool a_peticion = g_informe_ya.exchange(false, std::memory_order_relaxed);
+    if (a_peticion || now - report_start >=
+                          (g_ab_activas.load(std::memory_order_relaxed) ? kAbReportSeconds
                                                                         : kReportSeconds) *
-                          tick_freq;
-    if (now - report_start >= intervalo) {
-      Report(now - report_start, tick_freq, counters_last, kModes[modo].name);
+                              tick_freq) {
+      Report(now - report_start, tick_freq, counters_last, a_peticion ? "a peticion" : kModes[modo].name);
       if (g_ab_activas.load(std::memory_order_relaxed)) {
         const size_t siguiente = (modo + 1) % kModeCount;
         g_modo_ab.store(siguiente, std::memory_order_relaxed);

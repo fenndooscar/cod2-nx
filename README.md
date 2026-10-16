@@ -365,7 +365,10 @@ declaring functions inside functions, and one hand-added entry in `app/huecos.to
        the GPU work per report (`sin dibujados`, `sin transferencias`, `sin resolves`, `sin cargas de texturas`, …,
        `sin nada`), where `sin nada` against `normal` is the whole cost of the GPU work and a `sin nada` that is
        just as slow as `normal` means the cost is not in the work at all. `tools/perfil_consola.py` reads those
-       reports in a table of their own. See [docs/measuring.md](measuring.md#splitting-a-frame-that-is-cut-into-render-passes);
+       reports in a table of their own. And **L+R+ZR** (F8 on the PC) asks, in one press, which of the three walls
+       the frame is on — the ring thread, the GPU or the game's own threads — and writes both halves of the answer:
+       the renderer's verdict with its numbers, and the console profiler's per-thread report brought forward.
+       See [docs/measuring.md](measuring.md#splitting-a-frame-that-is-cut-into-render-passes);
 
        **The A/B answered, and it answered no.** `switch-logs/logs` (2026-10-12, the round-22 set: 13 reports, one
        per skip mode, 10 s each, in game) gives **4.3 FPS** for `normal` and, for the modes that did run, `sin

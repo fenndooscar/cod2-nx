@@ -20,6 +20,7 @@
 #include <rex/rex_app.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xthread.h>
+#include <rex/ui/keybinds.h>
 
 #include <algorithm>
 #include <atomic>
@@ -250,10 +251,25 @@ class Cod2App : public rex::ReXApp {
       const rex::system::IGraphicsSystem* gs = rt ? rt->graphics_system() : nullptr;
       return gs ? gs->presenter() : nullptr;
     });
+    /*
+     * The frame rate diagnosis (cod2_nativo_sistema.cpp, PedirDiagnosticoFps).
+     *
+     * On the console it is the pad combo L+R+ZR (switch_input_driver.cpp), which is why the port also exports
+     * Cod2DiagnosticoFps for it. On the PC there is no pad combo to press, so the same request is a keybind
+     * here, F8 by default and rebindable like the SDK's own (bind_console and friends): it shows up in the F4
+     * settings menu and is saved in the configuration.
+     *
+     * It is registered from the app and not from the SDK for the same reason the watchdog lives here: it is
+     * the port's own instrument, and the SDK should not carry it.
+     */
+    rex::ui::RegisterBind("bind_cod2_diagnostico", "F8",
+                          "COD2: frame rate diagnosis (the native renderer writes the verdict to the log)",
+                          [] { cod2::nativo::PedirDiagnosticoFps(); });
   }
 
   void OnShutdown() override {
     cod2::captura::Parar();
+    rex::ui::UnregisterBind("bind_cod2_diagnostico");
     cod2::perfil_pc::Parar();
     PararVigilante();
   }

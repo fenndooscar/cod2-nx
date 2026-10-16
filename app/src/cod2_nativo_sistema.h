@@ -33,6 +33,13 @@ void AvisarProgresoAnillo();
 // for most of the frame.
 uint64_t SwapsNativos();
 
+// Asks for a frame rate diagnosis: the ring thread brings its report forward and then writes the
+// verdict, which names the bottleneck (the ring thread, the GPU or the game's own threads) and the
+// numbers it is based on. Called from the pad combo on the console (L+R+ZR, see
+// switch_input_driver.cpp) and from the bind_cod2_diagnostico key on the PC (F8 by default). Cheap:
+// it only sets a flag that the ring thread reads once per loop. Does nothing with Xenos emulation.
+void PedirDiagnosticoFps();
+
 // The native graphics system: the SDK presenter, a reserved MMIO range, the vblank
 // thread and the command ring sink.
 std::unique_ptr<rex::system::IGraphicsSystem> CrearSistemaGrafico();

@@ -341,8 +341,15 @@ void SwitchInputDriver::Poll(size_t index) {
 }
 
 
-/* From the profiler (switch_perf.cpp): turns the GPU A/B test lap on and off. */
+/* From the profiler (switch_perf.cpp): turns the GPU A/B test lap on and off, and writes its report now. */
 extern "C" void RexSwitchPerfToggleAb(void);
+extern "C" void RexSwitchPerfInformeYa(void);
+/*
+ * From the port's native renderer (app/src/cod2_nativo_sistema.cpp), weak because the SDK also links titles
+ * that do not have it: it asks for a frame rate diagnosis, which the renderer's ring thread writes to the log
+ * as a verdict plus the numbers behind it. See docs/measuring.md.
+ */
+extern "C" void Cod2DiagnosticoFps(void) __attribute__((weak));
 /*
  * The SDK menus, on the controller
  *
@@ -356,6 +363,7 @@ extern "C" void RexSwitchPerfToggleAb(void);
  *   L + R + Down  -> log console
  *   L + R + Left  -> achievements
  *   L + R + ZL    -> GPU A/B test lap (for measuring, not for playing)
+ *   L + R + ZR    -> frame rate diagnosis (the port's own, docs/measuring.md)
  *   L + R + right stick -> moves the debug overlay if it is open
  *                          (its position is saved; see Poll and debug_overlay.cpp)
  *
@@ -415,6 +423,29 @@ void SwitchInputDriver::DispatchMenuShortcuts(Slot& slot, uint64_t held) {
   }
   slot.menu_shortcuts = ab_ahora ? (slot.menu_shortcuts | kBitAb)
                                  : (slot.menu_shortcuts & ~kBitAb);
+
+  /*
+   * L+R+ZR asks for a frame rate diagnosis, and it asks both halves of it: the port's native renderer writes
+   * the verdict and its numbers (weak, because the SDK also builds titles that do not have the port), and the
+   * profiler writes its own report immediately, which is the per-thread CPU, the pc sampling and the stacks of
+   * the long frames. Neither is enough alone: the verdict says which of the three walls it is, the profiler
+   * says which thread and which function. The port's own keybind does the same on the PC
+   * (bind_cod2_diagnostico).
+   */
+  const uint64_t kBitDiag = uint64_t(1) << 9;
+  const bool diag_ahora = modificador && (held & HidNpadButton_ZR) != 0;
+  const bool diag_antes = (slot.menu_shortcuts & kBitDiag) != 0;
+  if (diag_ahora && !diag_antes) {
+    RexSwitchPerfInformeYa();
+    if (&Cod2DiagnosticoFps != nullptr) {
+      Cod2DiagnosticoFps();
+      REXLOG_INFO("atajo de menu: diagnostico de fps (veredicto del renderizador nativo + informe de hilos)");
+    } else {
+      REXLOG_INFO("atajo de menu: informe de hilos pedido; este titulo no trae el veredicto del renderizador");
+    }
+  }
+  slot.menu_shortcuts = diag_ahora ? (slot.menu_shortcuts | kBitDiag)
+                                   : (slot.menu_shortcuts & ~kBitDiag);
 }
 
 SwitchInputDriver::Slot* SwitchInputDriver::FindSlot(DeviceId id) {

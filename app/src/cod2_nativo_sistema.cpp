@@ -34,6 +34,7 @@
 #include "cod2_esperas_tiron.h"
 #include "cod2_nativo_captura.h"
 #include "cod2_nativo_destinos.h"
+#include "cod2_nativo_diagnostico_fps.h"
 #include "cod2_nativo_ganchos.h"
 #include "cod2_nativo_shaders.h"
 
@@ -173,6 +174,46 @@ REXCVAR_DEFINE_BOOL(cod2_nativo_informes_diferidos, true, "COD2",
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 /*
+ * The frame rate diagnosis, and the button that asks for it.
+ *
+ * WHY IT EXISTS
+ *   "It is slow on the console" is a symptom with four very different causes, and the report above answers
+ *   none of them by itself: it prints 40 lines of counters and leaves the reader to work out which one is the
+ *   wall. The four are:
+ *
+ *     1. THE RING THREAD (the CPU that records the frame). It is the bottleneck whenever it is near 100 % of a
+ *        core: it decodes the guest's PM4 packets, records every Vulkan command, copies the vertex ranges and
+ *        prepares the textures. Everything it does not finish in 16.7 ms is a frame that misses.
+ *     2. THE GPU. It is the bottleneck when the work it was given takes longer than a frame. The way to tell
+ *        it apart from (1) is that the GPU is busy while the ring is waiting: the "hueco entre trabajos" (the
+ *        GPU idle time between submissions) is near zero.
+ *     3. THE GAME'S OWN THREADS. The main XThread and the preparer build the command list (culling, the
+ *        scenery, the simulation). If they are the ones at 100 %, the console is being asked for more than it
+ *        has and no renderer change helps.
+ *     4. THE FRAME ITSELF IS FINE and the loss is somewhere else: the swapchain interval, the resolution, the
+ *        frame being submitted but not presented (rechazos in the C2 line), a driver submission cost.
+ *
+ * WHAT IT DOES
+ *   PedirDiagnosticoFps() (the L+R+ZR combo on the console, the bind_cod2_diagnostico key on the PC) sets a
+ *   flag. The ring thread sees it in its loop, brings the periodic report forward so the numbers are fresh,
+ *   and writes one more block: the verdict, the numbers it is based on, and what to try next. The window is
+ *   the report interval, which by default is 20 s: at least a second of measurement is required, and if the
+ *   request arrives sooner the report is skipped and the flag stays set for the next loop.
+ *
+ * WHAT IT COSTS
+ *   One relaxed load per ring loop. The verdict itself is written once per button press.
+ *
+ * HOW TO TURN IT OFF
+ *   It cannot be turned off and it does not need to be: it only runs when asked. To ask for it from the PC
+ *   without the keyboard, --cod2_nativo_diagnostico_s=30 asks for it every 30 seconds on its own (0 = never,
+ *   the default), which is what a scripted measurement wants.
+ */
+REXCVAR_DEFINE_INT32(cod2_nativo_diagnostico_s, 0, "COD2",
+                     "Renderizador nativo: pide solo el diagnostico de fps cada N segundos (0 = nunca; en la "
+                     "consola es el atajo L+R+ZR y en el PC la tecla de bind_cod2_diagnostico, F8 por defecto)")
+    .range(0, 600);
+
+/*
  * IM_LOAD without memcmp. On every IM_LOAD the ring compared the whole microcode with guest memory (~0.6 us,
  * ~41,000 per second in a race). Now the D3D constructors and the fetch patcher report what they write
  * (cod2_microcodigo_versiones.h, with the cross-thread protocol) and the ring only compares if someone has
@@ -310,6 +351,25 @@ void InformeDiferido(std::string linea) {
     REXLOG_INFO("{}", linea);  // no report thread: as before (Encolar has not moved it)
   }
 }
+
+/*
+ * The flag the ring thread polls (see cod2_nativo_diagnostico_s). Set by the keybind on the PC and, on the
+ * console, by the pad combo through the SDK (RexSwitchPerfDiagnosticoPedido, switch_perf.cpp) - the app cannot
+ * read the pad itself, and the ring thread is the one that has to see it.
+ */
+std::atomic<bool> g_diagnostico_pedido{false};
+
+void PedirDiagnosticoFps() { g_diagnostico_pedido.store(true, std::memory_order_release); }
+
+/*
+ * The same thing, for the console's pad combo.
+ *
+ * On the Switch the menu shortcuts are read by the SDK's input driver (switch_input_driver.cpp), which lives in
+ * another target and knows nothing about the port. It declares this name weak and calls it if it exists, the
+ * same trick that file already uses for the GPU A/B test (RexSwitchPerfToggleAb in switch_perf.cpp). On the PC
+ * nothing declares it and nothing calls it: the keybind below is the way in there.
+ */
+extern "C" void Cod2DiagnosticoFps(void) { PedirDiagnosticoFps(); }
 
 }  // namespace cod2::nativo
 
@@ -660,6 +720,20 @@ constexpr int kMaxProfundidadIndirecta = 4;
 constexpr auto kEsperaRegMemMax = std::chrono::milliseconds(200);
 constexpr uint32_t kSalidaAncho = 1280;
 constexpr uint32_t kSalidaAlto = 720;
+
+/*
+ * Stage names of a recorded draw, in the order of EstadisticasDibujos::etapas_ns (cod2_nativo_dibujos.h).
+ * At file scope because two readers use them: the C6 report and the frame rate diagnosis, which names the
+ * most expensive stage when the ring thread turns out to be the bottleneck.
+ */
+constexpr const char* kEtapasDibujoNombres[] = {"estado",  "indices",  "texturas",
+                                                "pase",    "subidas",  "pipeline",
+                                                "grabar",  "(de la etapa pase, el cambio de pase)",
+                                                "[del cambio de pase, cerrar el anterior]",
+                                                "[destinos]", "[render pass y framebuffer]",
+                                                "[abrir el pase]"};
+static_assert(std::size(kEtapasDibujoNombres) == kEtapasDibujo,
+              "los nombres de las etapas tienen que coincidir con kEtapasDibujo");
 
 uint64_t NanosegundosDesde(std::chrono::steady_clock::time_point inicio) {
   return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -3812,14 +3886,197 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
   // Report lines go to the report thread (COD2_INFORME_ANILLO, see InformeDiferido), except the
   // shutdown ones (forzar), which are written right here so they are not lost.
 #define COD2_INFORME_SEGUN(diferir, ...) do { if (diferir) { COD2_INFORME_ANILLO(__VA_ARGS__); } else { REXLOG_INFO(__VA_ARGS__); } } while (0)
+
+  /*
+   * The numbers the verdict is based on, gathered by Informe while its locals are in scope. A struct rather
+   * than a dozen positional arguments: the verdict reads them by name and the reader of the call site does
+   * not have to count them.
+   */
+  struct CuadroFps {
+    double segundos = 0.0;
+    uint64_t fotogramas = 0;     // presents in the interval
+    uint64_t gpu_ns = 0;         // raw GPU timestamps of the timed submissions
+    uint64_t gpu_trabajos = 0;   // submissions those timestamps cover
+    uint64_t grabados = 0;       // draws recorded in the interval
+    uint64_t cronometrados = 0;  // of those, the ones with the stopwatch (1 in kCronometroCada)
+    // Ring thread, in nanoseconds over the interval.
+    uint64_t anillo_ns = 0;
+    uint64_t regmem_ns = 0;
+    uint64_t sin_trabajo_ns = 0;
+    uint64_t espera_copias_ns = 0;
+    // The game's own threads, in nanoseconds over the interval (cod2::esperas::g_ns, cumulative).
+    uint64_t juego_lista_ns = 0;
+    uint64_t juego_fuera_ns = 0;
+    uint64_t juego_sin_ordenes_ns = 0;
+    uint64_t juego_medio_ns = 0;
+    uint64_t juego_relevo_ns = 0;
+    std::array<uint64_t, kEtapasDibujo> etapas_ns{};
+    std::array<uint64_t, kGpuCategorias> categorias{};
+  };
+
+  /*
+   * The verdict, and why each branch is the one it is. See cod2_nativo_diagnostico_s for the four causes this
+   * separates. Every line prints the numbers it is based on, so a wrong verdict can be argued with instead of
+   * trusted: that is the whole point of pressing the button.
+   */
+  void VeredictoFps(const CuadroFps& c, bool diferir) {
+    if (c.segundos <= 0.0 || c.fotogramas == 0) {
+      COD2_INFORME_SEGUN(diferir, "[nativo] DIAGNOSTICO DE FPS: no hubo fotogramas en el intervalo");
+      return;
+    }
+    const auto pct = [&](uint64_t ns) { return double(ns) / 1e9 / c.segundos * 100.0; };
+    const double fotogramas = double(c.fotogramas);
+    const double ms_fotograma = c.segundos * 1000.0 / fotogramas;
+    const double fps = fotogramas / c.segundos;
+    /*
+     * The GPU timestamps are not nanoseconds. On the console NVK declares 1 ns per unit and the measured
+     * ratio is ~1.628 (the "escala de las marcas de GPU" line, and docs/measuring.md). The accumulated ratio
+     * of the whole session is used, because a verdict has to be comparable with the frame time printed next
+     * to it; when there are no timestamps at all the GPU part of the verdict is simply absent.
+     */
+    const double escala = (escala_marcas_ns_ > 0.0) ? escala_real_ns_ / escala_marcas_ns_ : 1.0;
+    const bool hay_gpu = c.gpu_trabajos > 0 && c.gpu_ns > 0;
+    const double gpu_ms_fotograma = hay_gpu ? double(c.gpu_ns) * escala / 1e6 / fotogramas : 0.0;
+    const auto cat = [&](uint32_t i) {
+      return double(c.categorias[i]) * escala / 1e6 / fotogramas;
+    };
+    const double hueco_ms = hay_gpu ? cat(kGpuHuecoEntreTrabajos) : 0.0;
+
+    const double anillo_pct = pct(c.anillo_ns);
+    const double regmem_pct = pct(c.regmem_ns);
+    const double sin_trabajo_pct = pct(c.sin_trabajo_ns);
+    const double copias_pct = pct(c.espera_copias_ns);
+    const double juego_lista_pct = pct(c.juego_lista_ns);
+    const double juego_fuera_pct = pct(c.juego_fuera_ns);
+    const double juego_sin_ordenes_pct = pct(c.juego_sin_ordenes_ns);
+    const double juego_medio_pct = pct(c.juego_medio_ns);
+    const double juego_relevo_pct = pct(c.juego_relevo_ns);
+    const double juego_pct = juego_lista_pct + juego_fuera_pct + juego_sin_ordenes_pct + juego_medio_pct;
+    const double gpu_pct = ms_fotograma > 0.0 ? 100.0 * gpu_ms_fotograma / ms_fotograma : 0.0;
+
+    COD2_INFORME_SEGUN(diferir, "[nativo] ======== DIAGNOSTICO DE FPS (pedido a mano) ========");
+    COD2_INFORME_SEGUN(diferir,
+                       "[nativo] fotograma {:.1f} ms ({:.1f} fps) sobre {} fotogramas en {:.1f} s; GPU ocupada "
+                       "{:.2f} ms por fotograma ({:.0f} % del tiempo{}), hueco entre trabajos {:.2f} ms; "
+                       "{} dibujos grabados en el intervalo",
+                       ms_fotograma, fps, c.fotogramas, c.segundos, gpu_ms_fotograma, gpu_pct,
+                       hay_gpu ? "" : ", sin marcas de GPU", hueco_ms, c.grabados);
+    COD2_INFORME_SEGUN(diferir,
+                       "[nativo] anillo: grabando {:.0f} % de un nucleo, esperando al juego {:.0f} % (WAIT_REG_MEM "
+                       "{:.0f}, sin trabajo {:.0f}), esperando las copias de vertices {:.0f} %",
+                       anillo_pct, regmem_pct + sin_trabajo_pct, regmem_pct, sin_trabajo_pct, copias_pct);
+    COD2_INFORME_SEGUN(diferir,
+                       "[nativo] juego: llenando la lista {:.0f} % del reloj, fuera de la lista {:.0f} %, sin "
+                       "ordenes {:.0f} %, dentro de la logica {:.0f} %, relevos entre hilos {:.0f} %",
+                       juego_lista_pct, juego_fuera_pct, juego_sin_ordenes_pct, juego_medio_pct, juego_relevo_pct);
+
+    /*
+     * Which of the four causes it is. The decision itself is in cod2_nativo_diagnostico_fps.h, on its own and
+     * with its own self-check (tools/pc/probar_diagnostico_fps.cpp): a chain of thresholds is exactly what goes
+     * wrong silently, and here a wrong verdict sends the next round of work at the wrong thread.
+     */
+    const CausaFps causa =
+        DecidirCausaFps(anillo_pct, hay_gpu, gpu_pct, juego_pct, hueco_ms, ms_fotograma);
+    COD2_INFORME_SEGUN(diferir,
+                       "[nativo] VEREDICTO: {} | anillo {:.0f} % de un nucleo, GPU {:.0f} % del fotograma, juego "
+                       "{:.0f} %, hueco de GPU {:.2f} ms de {:.1f}",
+                       NombreCausaFps(causa), anillo_pct, gpu_pct, juego_pct, hueco_ms, ms_fotograma);
+
+    // What to change, for the branch that was chosen.
+    if (causa == CausaFps::kAnillo) {
+      size_t peor = 0;
+      for (size_t i = 1; i < c.etapas_ns.size(); ++i) {
+        if (c.etapas_ns[i] > c.etapas_ns[peor]) {
+          peor = i;
+        }
+      }
+      COD2_INFORME_SEGUN(diferir,
+                         "[nativo]   la etapa mas cara del anillo es '{}': {:.1f} us por dibujo grabado. Si el "
+                         "anillo es el muro, se ataca esa etapa; el resto de la lista [nativo] C6 etapas la "
+                         "desglosa entera",
+                         kEtapasDibujoNombres[peor],
+                         c.cronometrados ? double(c.etapas_ns[peor]) / 1e3 / double(c.cronometrados) : 0.0);
+    }
+    if (hay_gpu) {
+      COD2_INFORME_SEGUN(diferir,
+                         "[nativo]   GPU por fotograma: sombras {:.2f} ms, escena {:.2f}, escena sin profundidad "
+                         "{:.2f}, copias {:.2f}, borrados {:.2f}, menores {:.2f}, cubo y desenfoque {:.2f}, "
+                         "hueco {:.2f}",
+                         cat(kGpuSombras), cat(kGpuEscena), cat(kGpuEscenaSinProfundidad), cat(kGpuCopias),
+                         cat(kGpuBorrados), cat(kGpuMenores), cat(kGpu320), hueco_ms);
+    }
+    if (causa == CausaFps::kJuego) {
+      COD2_INFORME_SEGUN(diferir,
+                         "[nativo]   el juego es el muro: no lo arregla el renderizador. Lo que se puede bajar "
+                         "es lo que el port le pide (resolucion interna, vegetacion de sombras, LOD del "
+                         "escenario); lo que no, es el propio juego");
+    }  }
+
   void Informe(bool forzar) {
     const auto ahora = Reloj::now();
+    /*
+     * The diagnosis asks for a report where it stands: fresh numbers, and the verdict right after them.
+     *
+     * `con_veredicto` is the flag the keybind (PC) or the pad combo (console) sets, or cod2_nativo_diagnostico_s
+     * when it asks on its own. The verdict needs an interval of at least a second to mean anything, so a
+     * request that arrives before that is left standing instead of being discarded: the next loop of the ring
+     * thread writes it. That is what makes the button idempotent - pressing it twice only moves the next
+     * verdict - and what lets the interval be measured over whatever the frame rate happens to give.
+     */
+    const bool con_veredicto =
+        (g_diagnostico_pedido.load(std::memory_order_acquire) ||
+         (REXCVAR_GET(cod2_nativo_diagnostico_s) > 0 &&
+          ahora - ultimo_diagnostico_cvar_ >=
+              std::chrono::seconds(REXCVAR_GET(cod2_nativo_diagnostico_s)))) &&
+        std::chrono::duration<double>(ahora - ultimo_tiempo_informe_).count() >= 1.0;
+    if (con_veredicto) {
+      forzar = true;  // the numbers have to be written now, not queued behind the report thread
+      g_diagnostico_pedido.store(false, std::memory_order_release);
+      ultimo_diagnostico_cvar_ = ahora;
+    }
     if (!forzar &&
         ahora - ultimo_informe_ < std::chrono::seconds(REXCVAR_GET(cod2_nativo_informe_s))) {
       return;
     }
     const bool diferir_informe = !forzar;
     ultimo_informe_ = ahora;
+    /*
+     * Everything the verdict needs is gathered here, in the scope where it exists, and the verdict is written
+     * at the very end (after the normal report, so the numbers it names can be read in the same block).
+     * `segundos` is the interval since the previous report: the first call passes 1 to set the baseline and
+     * the verdict is skipped then (`fotogramas == 0`).
+     */
+    CuadroFps cuadro;
+    cuadro.anillo_ns = tiempo_anillo_ns_;
+    cuadro.regmem_ns = cod2::esperas::g_ns[cod2::esperas::kAnilloRegMem].load(std::memory_order_relaxed) -
+                       esperas_veredicto_previas_[cod2::esperas::kAnilloRegMem];
+    cuadro.sin_trabajo_ns =
+        cod2::esperas::g_ns[cod2::esperas::kAnilloSinTrabajo].load(std::memory_order_relaxed) -
+        esperas_veredicto_previas_[cod2::esperas::kAnilloSinTrabajo];
+    cuadro.espera_copias_ns = cod2::esperas::g_ns_esperando_copias.load(std::memory_order_relaxed) -
+                              esperas_copias_veredicto_previas_;
+    cuadro.juego_lista_ns =
+        cod2::esperas::g_ns[cod2::esperas::kPreparadorLista].load(std::memory_order_relaxed) -
+        esperas_veredicto_previas_[cod2::esperas::kPreparadorLista];
+    cuadro.juego_fuera_ns =
+        cod2::esperas::g_ns[cod2::esperas::kPreparadorFuera].load(std::memory_order_relaxed) -
+        esperas_veredicto_previas_[cod2::esperas::kPreparadorFuera];
+    cuadro.juego_sin_ordenes_ns =
+        cod2::esperas::g_ns[cod2::esperas::kEjecutorSinOrdenes].load(std::memory_order_relaxed) -
+        esperas_veredicto_previas_[cod2::esperas::kEjecutorSinOrdenes];
+    cuadro.juego_medio_ns =
+        cod2::esperas::g_ns[cod2::esperas::kJuegoMedio].load(std::memory_order_relaxed) -
+        esperas_veredicto_previas_[cod2::esperas::kJuegoMedio];
+    cuadro.juego_relevo_ns =
+        cod2::esperas::g_ns[cod2::esperas::kRelevoEjecutor].load(std::memory_order_relaxed) -
+        esperas_veredicto_previas_[cod2::esperas::kRelevoEjecutor] +
+        cod2::esperas::g_ns[cod2::esperas::kRelevoPreparador].load(std::memory_order_relaxed) -
+        esperas_veredicto_previas_[cod2::esperas::kRelevoPreparador];
+    for (size_t t = 0; t < cod2::esperas::kNumTipos; ++t) {
+      esperas_veredicto_previas_[t] = cod2::esperas::g_ns[t].load(std::memory_order_relaxed);
+    }
+    esperas_copias_veredicto_previas_ =
+        cod2::esperas::g_ns_esperando_copias.load(std::memory_order_relaxed);
     COD2_INFORME_SEGUN(diferir_informe,
         "[nativo] swaps={} vblanks={} paquetes={} interrupciones={} indirectos={} "
         "escrituras_memoria={} esperas_agotadas={} dibujos={} copias={}",
@@ -3830,6 +4087,7 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
     // WAIT_REG_MEM waits and the wait for the GPU when presenting.
     const double segundos = std::chrono::duration<double>(ahora - ultimo_tiempo_informe_).count();
     ultimo_tiempo_informe_ = ahora;
+    cuadro.segundos = segundos;
     if (segundos > 0.0) {
       COD2_INFORME_SEGUN(diferir_informe,
           "[nativo] tiempos: anillo {:.1f} ms/s; dibujos {:.1f} us/dibujo ({}); copias {:.1f} us/copia; "
@@ -3982,6 +4240,10 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
       uint64_t gpu_ns = 0, gpu_trabajos = 0;
       destinos_->TiempoGpu(gpu_ns, gpu_trabajos);
       const uint64_t presentados_intervalo = presentados - presentados_previos_gpu_;
+      cuadro.fotogramas = presentados_intervalo;
+      cuadro.gpu_ns = gpu_ns - gpu_ns_previo_;
+      cuadro.gpu_trabajos = gpu_trabajos - gpu_trabajos_previos_;
+      destinos_->TiempoGpuPorCategoria(cuadro.categorias);
       COD2_INFORME_SEGUN(diferir_informe, "[nativo] C2: copias={} (de profundidad {}) borrados={} (de profundidad {}) "
                   "presentados={} rechazos={}; GPU {:.2f} ms por Swap ({} trabajos medidos)",
                   copias, destinos_->CopiasProfundidad(), borrados,
@@ -4048,6 +4310,10 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
       }
       std::array<uint64_t, kGpuCategorias> categorias{};
       destinos_->TiempoGpuPorCategoria(categorias);
+      // The verdict wants the interval, like the line above: the counters are cumulative since startup.
+      for (uint32_t c = 0; c < kGpuCategorias; ++c) {
+        cuadro.categorias[c] = categorias[c] - gpu_categorias_previas_[c];
+      }
       if (presentados_intervalo) {
         const auto ms = [&](uint32_t c) {
           return double(categorias[c] - gpu_categorias_previas_[c]) / 1e6 /
@@ -4294,16 +4560,15 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
       // Per-stage cost of the draws recorded since the previous report, measured on the timed ones.
       const uint64_t grabados = d.dibujados - dibujados_previos_;
       const uint64_t cronometrados = d.dibujados_cronometrados - cronometrados_previos_;
+      cuadro.grabados = grabados;
+      cuadro.cronometrados = cronometrados;
+      for (size_t i = 0; i < d.etapas_ns.size(); ++i) {
+        cuadro.etapas_ns[i] = d.etapas_ns[i] - etapas_previas_[i];
+      }
       if (grabados && cronometrados) {
-        static constexpr const char* kEtapas[] = {"estado",  "indices",  "texturas",
-                                                  "pase",    "subidas",  "pipeline",
-                                                  "grabar",  "(de la etapa pase, el cambio de pase)",
-                                                  "[del cambio de pase, cerrar el anterior]",
-                                                  "[destinos]", "[render pass y framebuffer]",
-                                                  "[abrir el pase]"};
         std::string etapas;
         for (size_t i = 0; i < d.etapas_ns.size(); ++i) {
-          etapas += fmt::format(" {} {:.1f}", kEtapas[i],
+          etapas += fmt::format(" {} {:.1f}", kEtapasDibujoNombres[i],
                                 double(d.etapas_ns[i] - etapas_previas_[i]) / 1e3 / double(cronometrados));
         }
         /*
@@ -4624,6 +4889,14 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
       }
       COD2_INFORME_SEGUN(diferir_informe, "[nativo] paquetes tipo 3 por opcode (hex=cuenta):{}", lineas);
     }
+    /*
+     * The verdict goes last, and only when it was asked for: by the keybind or the pad combo
+     * (g_diagnostico_pedido) or by cod2_nativo_diagnostico_s. With `forzar` on, its lines are written right
+     * here instead of through the report thread, because the player is waiting for them.
+     */
+    if (con_veredicto) {
+      VeredictoFps(cuadro, false);
+    }
   }
 
 #undef COD2_INFORME_SEGUN
@@ -4830,6 +5103,11 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
   uint64_t fase_cronometro_dibujos_ = 0;  // phase of the DibujarNativo timer, never reset
   uint64_t copias_medidas_ = 0;
   uint64_t presentaciones_medidas_ = 0;
+  // Frame rate diagnosis (cod2_nativo_diagnostico_s, VeredictoFps). The previous values are kept so the
+  // verdict talks about the interval between two presses and not about counters that grow from startup.
+  std::array<uint64_t, cod2::esperas::kNumTipos> esperas_veredicto_previas_{};
+  uint64_t esperas_copias_veredicto_previas_ = 0;
+  std::chrono::steady_clock::time_point ultimo_diagnostico_cvar_{};
   // Ring breakdown per packet: registers (types 0 and 1) and each type-3 opcode.
   uint64_t tiempo_registros_ns_ = 0;
   uint64_t cuenta_registros_ = 0;
@@ -4967,8 +5245,7 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
   uint64_t marca_gpu_previa_ns_ = 0;
   uint64_t trabajos_precisos_previos_ = 0;
   Reloj::time_point reloj_marca_previo_{};
-  double escala_real_ns_ = 0.0;
-  double escala_marcas_ns_ = 0.0;
+  double escala_real_ns_ = 0.0;  double escala_marcas_ns_ = 0.0;
   Reloj::time_point ultimo_tiempo_informe_{};
   Reloj::time_point ultimo_informe_{};
   // Trace of one frame (cod2_nativo_diag_fotograma_s).

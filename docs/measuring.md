@@ -207,14 +207,58 @@ chosen:
    port does to record it (`sdk/src/ui/switch_perf.cpp`, `RexSwitchPerfSkip`). `sin dibujados` therefore still
    reports ~164 draws per frame and `sin resolves` still runs the whole transfer and render-pass machinery. Each
    mode measures GPU work removed, not CPU work removed, which is what makes the comparison against `normal` clean.
-6. **What is still missing: per-pass GPU time.** Nothing here says whether the frame is bound by the passes'
+6. **Which of the three walls it is, asked one frame at a time: L+R+ZR.** The rotation above answers "is the GPU work
+   the wall" over a whole report, and the `gpu:` line answers "how busy was the GPU" over ten seconds. Neither says
+   *which thread* is late, which is the question that decides what to change. Pressing **L+R+ZR** in game (F8 on the
+   PC, `bind_cod2_diagnostico`) asks for a diagnosis, and the numbers are written where they stand: the renderer's
+   ring thread brings its report forward and prints a verdict, and the console profiler writes its own report
+   immediately instead of at the end of its ten-second interval (`RexSwitchPerfInformeYa`). In the log
+   (`logs/rex/rex_perfil.log` for the profiler half, the `[nativo]` lines for the verdict):
+
+   ```
+   ======== DIAGNOSTICO DE FPS (pedido a mano) ========
+   fotograma 16.7 ms (60.0 fps) sobre 480 fotogramas en 8.0 s; GPU ocupada 2.09 ms por fotograma
+     (13 % del tiempo), hueco entre trabajos 14.58 ms; 232947 dibujos grabados en el intervalo
+   anillo: grabando 100 % de un nucleo, esperando al juego 68 % (WAIT_REG_MEM 68, sin trabajo 0),
+     esperando las copias de vertices 1 %
+   juego: llenando la lista 0 % del reloj, fuera de la lista 0 %, sin ordenes 0 %, dentro de la
+     logica 0 %, relevos entre hilos 0 %
+   VEREDICTO: EL HILO DEL ANILLO (el que graba los comandos) | anillo 100 % de un nucleo, GPU 13 %
+     del fotograma, juego 0 %, hueco de GPU 14.58 ms de 16.7
+     la etapa mas cara del anillo es 'indices': 2.3 us por dibujo grabado. ...
+     GPU por fotograma: sombras 0.00 ms, escena 1.38, ... hueco 14.58
+   ```
+
+   The verdict is one of four, and the order of the checks is the order that decides it:
+   - **the ring thread** at 60 % or more of a core. It hides everything else, because it is the thread that keeps
+     the GPU busy and it is the port's own code, so this is the one cause a renderer change can fix. The line after
+     it names the most expensive of the twelve stages of a recorded draw (`C6 etapas` has the whole breakdown).
+   - **the GPU** busy 80 % or more of the frame, when the ring is not saturated. Then the frame is what it shades
+     and the way forward is less of it (`sin pixels` above says whether that is pixels or draw calls).
+   - **the game's own threads**, 40 % or more of the wall clock between them. Then no renderer change helps; what can
+     be lowered is what the port asks the game for (internal resolution, shadow vegetation, scenery LOD).
+   - **none of them, with the GPU idle half the frame or more.** The frame is lost waiting, not working, and the
+     suspects are the swapchain interval, the Swap rejects in the `C2:` line, or a driver round trip.
+
+   A press only writes when there is at least one second of interval behind it (the verdict needs it to divide by),
+   so pressing twice does not give a second verdict; the request stays armed until a report has the numbers. The
+   same request can be made without touching the console: `cod2_nativo_diagnostico_s=30` asks for it on its own
+   every 30 s, which is what a scripted session wants.
+
+   **Read the two halves together.** The verdict says which wall it is and never mentions a thread name; the
+   profiler report that the same button writes says the CPU of every thread with its priority and its core, and
+   with `perfil_pilas.flag` on the SD card it also says what each one was executing during the long frames. Alone,
+   the verdict sends you to the wrong file; alone, the profiler report leaves you deciding by eye which of fifteen
+   threads matters. And it is a *hypothesis* like everything else here: if the verdict says the ring thread and the
+   profiler report shows the ring thread at 40 %, believe the profiler report.
+7. **What is still missing: per-pass GPU time.** Nothing here says whether the frame is bound by the passes'
    bandwidth or by the pixels the draws shade; the scissor counter (counter 6) is the sum of every draw's scissor
    rectangle without clipping, so it is an upper bound of an upper bound. The *whole frame's* GPU busy time is now
-   measured (item 8), which is enough to say whether the GPU is the wall at all, but not which pass is. That needs
+   measured (item 9), which is enough to say whether the GPU is the wall at all, but not which pass is. That needs
    `vkCmdWriteTimestamp` at the pass boundaries, read back a frame later, with the scale of the section above — the
    parked native renderer (`app/src/aparcado/cod2_nativo_destinos.cpp`) has a working implementation to copy the
    plumbing from.
-7. **The GPU half of the frame, timed directly, and the trap in reading it.** The `libnx por segundo` line separates
+8. **The GPU half of the frame, timed directly, and the trap in reading it.** The `libnx por segundo` line separates
    `fences consultadas` from `fences esperadas`, and that is not a style choice: `nvFenceWait(fence, 0)` and
    `nvFenceWait(fence, timeout)` behave differently (`sdk/src/ui/switch_perf.cpp`, the `nvFenceWait` wrapper), and
    only the second blocks. So `esperadas ms ÷ fps` is the milliseconds per frame spent *blocked waiting for the
@@ -225,7 +269,7 @@ chosen:
    faster, it is other GPU-related blocking plus CPU work. The `CPU total %` on the report's first line is not the
    CPU half either, because a thread blocked inside `nvFenceWait` still counts as running. The only way to find the
    floor under all the GPU work is to remove all of it at once (`sin nada`).
-8. **How busy the GPU really was, which is the one thing the fence wait cannot say.** `esperadas` measures the guest
+9. **How busy the GPU really was, which is the one thing the fence wait cannot say.** `esperadas` measures the guest
    blocking, and a guest blocks just as long when the GPU is the wall as when the two are taking turns and each one
    waits for the other — the two shapes are identical from the guest's side and need opposite fixes. The `gpu:` line
    is the direct answer: GPU-busy milliseconds per presented frame and as a share of the wall clock, from the
@@ -235,14 +279,14 @@ chosen:
    frame is mostly waiting on something that is not GPU execution — a fence that is signalled late, a driver
    round trip, a guest thread — and cutting GPU work will not buy the frame rate it looks like it should. And a share
    far above 100 % means the scale is wrong, not that the GPU is overworked.
-9. **The answer, and the budget it leaves.** The round-25 session ran this whole list and the reading is the first
+10. **The answer, and the budget it leaves.** The round-25 session ran this whole list and the reading is the first
    case. In game, `normal`, 5.9 fps: the GPU is busy **175.2 ms of a 169.5 ms frame** and `si fuera el limite` says
    5.7 fps, so the GPU work *is* the frame. `sin nada` — every category of GPU work removed, the 89.3 render pass ends
    and the ~277 barrier batches still recorded — runs at **29.0 fps with the GPU busy 24.5 ms of a 34.5 ms frame**,
    so everything the port does on its own, with nothing to draw, is 24.5 ms: removing all of the port's own overhead
    would take 5.9 fps to 6.9. The A/B deltas, in GPU milliseconds per frame, are the guest's own draws **87.4**,
    resolves 63.2, transfers 25.0, texture loads 20.8, the presentation effect 4.8.
-10. **What those deltas mean, and the mistake to avoid with them.** It is tempting to read the 87.4 ms as "what the
+11. **What those deltas mean, and the mistake to avoid with them.** It is tempting to read the 87.4 ms as "what the
    game's shading costs" and conclude that no port can fit it into the 33.3 ms that 30 fps is. That does not follow.
    The figure is what the guest's draws cost *as this port's emulation path executes them*, and on a tile-based GPU
    that path charges each draw a render pass end — a store and a reload of the whole render area, plus a pipeline
